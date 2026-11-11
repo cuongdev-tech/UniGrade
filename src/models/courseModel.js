@@ -1,5 +1,6 @@
 // Model bảng courses — ánh xạ giữa document Firestore và object dùng trong app.
 import { firstValue, numericValue } from './utils';
+import { LETTER_POINTS } from '../services/gradeService';
 
 // Tên field theo ERD (14 field).
 export const FIELDS = [
@@ -34,18 +35,8 @@ export const ALIASES = {
   letter_grade: ['letter_grade', 'grade_letter', 'grade'],
 };
 
-// Bảng quy đổi điểm chữ ↔ hệ 4, khớp với getGradeLetter() trong App.js.
-export const LETTER_POINTS = {
-  'A+': 4.0,
-  A: 3.7,
-  'B+': 3.5,
-  B: 3.0,
-  'C+': 2.5,
-  C: 2.0,
-  'D+': 1.5,
-  D: 1.0,
-  F: 0,
-};
+// Bảng quy đổi điểm chữ ↔ hệ 4 (dùng chung với gradeService).
+export { LETTER_POINTS };
 
 // "A+ (4.0)" -> "A+" ; "Chờ nhập CK" -> null
 export const toLetterGrade = (badge) => {

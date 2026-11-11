@@ -17,6 +17,42 @@ export const isGradeValueInvalid = (value) => {
   return !Number.isFinite(grade) || grade < 0 || grade > 10;
 };
 
+// Bảng quy đổi điểm chữ ↔ hệ 4. Dùng chung cho model, nhập Excel và xuất CSV
+// để tránh mỗi nơi định nghĩa một kiểu.
+export const LETTER_POINTS = {
+  'A+': 4.0,
+  A: 3.7,
+  'B+': 3.5,
+  B: 3.0,
+  'C+': 2.5,
+  C: 2.0,
+  'D+': 1.5,
+  D: 1.0,
+  F: 0,
+};
+
+// "A+ (4.0)" | "a+" | "A" -> { letter: 'A+', point: 4 }
+// Chỉ nhận đúng ký tự điểm chữ, không nhận nhầm badge dạng "Chờ nhập CK".
+export const parseLetterGrade = (value) => {
+  const text = String(value ?? '').trim().toUpperCase();
+  if (!text) return null;
+  const match = text.match(/^([A-F]\+?)(?:\s|\(|$)/);
+  if (!match) return null;
+  const letter = match[1];
+  if (!Object.prototype.hasOwnProperty.call(LETTER_POINTS, letter)) return null;
+  return { letter, point: LETTER_POINTS[letter] };
+};
+
+// 3.7 -> "A" ; không khớp bảng (ví dụ 3.9) -> null
+export const getLetterByPoint = (point) => {
+  const value = Number(point);
+  if (!Number.isFinite(value)) return null;
+  const letter = Object.keys(LETTER_POINTS).find(
+    (item) => Math.abs(LETTER_POINTS[item] - value) < 0.05
+  );
+  return letter || null;
+};
+
 // Điểm hệ 10 -> điểm chữ, hệ 4, trạng thái và xếp loại.
 export const getGradeLetter = (total) => {
   if (total >= 9.0) return { text: 'A+ (4.0)', point: 4.0, status: 'passed', rank: 'Xuất sắc' };

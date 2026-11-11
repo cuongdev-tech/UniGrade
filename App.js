@@ -241,7 +241,7 @@ export default function App() {
   // Quản lý luồng di chuyển giữa 12 màn hình chính + 2 màn phụ (Screen State)
   // 1: Đăng nhập | 2: Đăng ký | 3: Dashboard | 4: Quản lý Học kỳ | 5: Bảng điểm HK1
   // 6: Danh sách Môn | 7: Thêm Học phần mới | 8: Sửa Học phần & Sửa điểm
-  // 9: Dự báo Điểm What-if | 10: Nhắc thi & Hồ sơ | 11: Thêm Lịch Nhắc Thi Mới | 12: Quên Mật Khẩu
+  // 9: Dự báo Điểm What-if | 10: Nhắc thi | 11: Thêm Lịch Nhắc Thi Mới | 12: Quên Mật Khẩu
   // 13 (phụ): Chi tiết thông báo nhắc thi (mở từ thông báo, quay lại Màn 10 - Nhắc thi)
   // Lưu ý: màn khóa + banner thông báo là UI của hệ điều hành, không phải màn hình trong app.
   const {
@@ -298,6 +298,7 @@ export default function App() {
     selectedStatusFilter,
     setSelectedStatusFilter,
     gradeImportMessage,
+    gradeImportMessageType,
     setGradeImportMessage,
     courseActionNotice,
     setCourseActionNotice,
@@ -374,6 +375,7 @@ export default function App() {
     TOTAL_PROGRAM_SEMESTERS,
     formatSemesterGpa,
     formatSemesterAverage,
+    isSemesterGpaProvisional,
     semesterStats,
     overallStats,
     remainingCredits,
@@ -402,6 +404,9 @@ export default function App() {
     exportGradeData,
     importGradesFromFile,
   } = useUniGradeViewModel();
+
+  // Trạng thái UI cục bộ: modal Hồ sơ cá nhân mở từ avatar ở trang Tổng quan.
+  const [isProfileModalOpen, setIsProfileModalOpen] = React.useState(false);
 
   // ==========================================================================
   // MÀN HÌNH 1: ĐĂNG NHẬP (THÀNH VIÊN 3 - MÀU XANH LÁ)
@@ -648,10 +653,30 @@ export default function App() {
           </Text>
           <Text style={styles.screenTitle}>Tổng quan Kết quả học tập</Text>
         </View>
-        <View style={hasOverallGpa ? rankBadge : styles.badgeGray}>
-          <Text style={hasOverallGpa ? rankBadgeText : styles.badgeGrayText}>
-            {hasOverallGpa ? overallRank.text : '--'}
-          </Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          <View style={hasOverallGpa ? rankBadge : styles.badgeGray}>
+            <Text style={hasOverallGpa ? rankBadgeText : styles.badgeGrayText}>
+              {hasOverallGpa ? overallRank.text : '--'}
+            </Text>
+          </View>
+          <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel="Mở hồ sơ cá nhân"
+            style={{
+              width: 40,
+              height: 40,
+              borderRadius: 20,
+              backgroundColor: COLORS.blue,
+              alignItems: 'center',
+              justifyContent: 'center',
+              marginLeft: 10,
+            }}
+            onPress={() => setIsProfileModalOpen(true)}
+          >
+            <Text style={{ color: COLORS.white, fontSize: 13, fontWeight: '700' }}>
+              {(profile?.fullName || firebaseUser?.displayName || 'SV').split(/\s+/).slice(-2).map((part) => part[0]).join('').toUpperCase()}
+            </Text>
+          </TouchableOpacity>
         </View>
       </View>
 
@@ -688,13 +713,14 @@ export default function App() {
           {chartSemesters.map((sem, index) => {
             const isActive = index === chartSemesters.length - 1;
             const hasFinalGpa = hasFinalSemesterGpa(sem.stats);
-            const h = hasFinalGpa ? Math.max(16, Math.round((sem.stats.gpa / 4) * 90)) : 16;
+            const isProvisionalGpa = isSemesterGpaProvisional(sem.stats);
+            const h = (hasFinalGpa || isProvisionalGpa) ? Math.max(16, Math.round((sem.stats.gpa / 4) * 90)) : 16;
             return (
               <View key={sem.id} style={{ alignItems: 'center' }}>
                 <Text style={{ fontSize: 11, fontWeight: '600', color: isActive ? COLORS.blue : COLORS.textMuted }}>
                   {formatSemesterGpa(sem.stats)}
                 </Text>
-                <View style={{ width: 34, height: h, backgroundColor: hasFinalGpa ? (isActive ? COLORS.blue : '#93C5FD') : COLORS.border, borderRadius: 6, marginVertical: 4 }} />
+                <View style={{ width: 34, height: h, backgroundColor: hasFinalGpa ? (isActive ? COLORS.blue : '#93C5FD') : isProvisionalGpa ? '#BFDBFE' : COLORS.border, borderRadius: 6, marginVertical: 4 }} />
                 <Text style={{ fontSize: 11, color: isActive ? COLORS.blue : COLORS.textMuted, fontWeight: isActive ? '700' : '400' }}>
                   {sem.rawName.replace('Học kỳ ', 'HK')}
                 </Text>
@@ -855,6 +881,7 @@ export default function App() {
     const sem = semesterStats.find((item) => item.id === selectedSemesterId) || currentSemesterStats;
     const detailCourses = subjects.filter((item) => item.sem === sem.id);
     const hasFinalGpa = hasFinalSemesterGpa(sem.stats);
+    const isProvisionalGpa = isSemesterGpaProvisional(sem.stats);
     const rank = getRankByGPA(sem.stats.gpa);
     const rankBadge = rank.tone === 'green' ? styles.badgeGreen : rank.tone === 'blue' ? styles.badgeBlue : rank.tone === 'amber' ? styles.badgeAmber : styles.badgeRed;
     const rankBadgeText = rank.tone === 'green' ? styles.badgeGreenText : rank.tone === 'blue' ? styles.badgeBlueText : rank.tone === 'amber' ? styles.badgeAmberText : styles.badgeRedText;
@@ -889,6 +916,11 @@ export default function App() {
         <Text style={[styles.heroSub, { marginTop: 8 }]}>
           Tổng {sem.stats.count} học phần trong kỳ • TC còn lại toàn khóa: {remainingCredits}/{TOTAL_PROGRAM_CREDITS} TC
         </Text>
+        {isProvisionalGpa && (
+          <Text style={[styles.heroSub, { marginTop: 4 }]}>
+            * Tạm tính: đã có điểm {sem.stats.gradedCount}/{sem.stats.count} môn
+          </Text>
+        )}
       </View>
 
       <Text style={styles.sectionTitle}>Điểm các môn trong Học kỳ ({detailCourses.length})</Text>
@@ -964,14 +996,32 @@ export default function App() {
           >
             <Text style={styles.addSubjectButtonText}>+ Thêm môn</Text>
           </TouchableOpacity>
+        </View>
+
+        <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12 }}>
           <TouchableOpacity
-            style={styles.importGradesButton}
+            style={[styles.importGradesButton, { flex: 1, alignItems: 'center' }]}
             accessibilityRole="button"
+            accessibilityLabel="Nhập điểm từ file Excel"
             onPress={importGradesFromFile}
           >
             <Text style={styles.importGradesButtonText}>⇧ Nhập điểm</Text>
           </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.importGradesButton, { flex: 1, alignItems: 'center' }]}
+            accessibilityRole="button"
+            accessibilityLabel="Xuất bảng điểm ra file CSV"
+            onPress={exportGradeData}
+          >
+            <Text style={styles.importGradesButtonText}>⇩ Xuất điểm</Text>
+          </TouchableOpacity>
         </View>
+
+        {!!profileNotice && (
+          <Text style={{ fontSize: 11, fontWeight: '600', color: COLORS.green, marginBottom: 8 }}>
+            {profileNotice}
+          </Text>
+        )}
 
         <View style={styles.subjectSearch}>
           <Ionicons name="search-outline" size={14} color={COLORS.textMuted} />
@@ -1092,10 +1142,17 @@ export default function App() {
         )}
 
         <Text style={styles.importGradesHint}>
-          File Excel cần có cột Tên môn học và các cột điểm CC, GK, CK.
+          File Excel cần cột Tên môn học + điểm CC (QT/BT), GK, CK; có thể kèm Kỳ/Năm học, Số TC, Công thức điểm, Thang 10, Thang 4, Chữ. Môn chưa có trong app cần đủ Kỳ/Năm học + Số TC để tự tạo.
         </Text>
         {!!gradeImportMessage && (
-          <Text style={styles.importGradesMessage}>{gradeImportMessage}</Text>
+          <Text style={[
+            styles.importGradesMessage,
+            gradeImportMessageType === 'error'
+              ? styles.importGradesMessageError
+              : styles.importGradesMessageSuccess,
+          ]}>
+            {gradeImportMessage}
+          </Text>
         )}
 
         {visibleSubjects.map((subject, index) => {
@@ -1658,9 +1715,9 @@ export default function App() {
   };
 
   // ==========================================================================
-  // MÀN HÌNH 10: THÔNG BÁO NHẮC THI & HỒ SƠ (THÀNH VIÊN 3 - MÀU XANH LÁ)
+  // MÀN HÌNH 10: NHẮC THI (THÀNH VIÊN 3 - MÀU XANH LÁ). Hồ sơ cá nhân đã chuyển sang modal ở trang Tổng quan.
   // ==========================================================================
-  const renderScreen10RemindersProfile = () => (
+  const renderScreen10Reminders = () => (
     <ScrollView contentContainerStyle={styles.notificationScreenPage}>
       <View style={styles.statusBarRow}>
         <Text style={styles.timeText}>09:41</Text>
@@ -1704,72 +1761,6 @@ export default function App() {
         >
           <Text style={styles.primaryBtnText}>+ Thêm lịch nhắc thi mới</Text>
         </TouchableOpacity>
-      </View>
-
-      <Text style={[styles.screenTitle, { marginTop: 20, marginBottom: 10 }]}>Hồ sơ cá nhân</Text>
-
-      <View style={styles.card}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 14 }}>
-          <View
-            style={{
-              width: 44,
-              height: 44,
-              borderRadius: 22,
-              backgroundColor: COLORS.blue,
-              alignItems: 'center',
-              justifyContent: 'center',
-              marginRight: 12,
-            }}
-          >
-            <Text style={{ color: COLORS.white, fontSize: 14, fontWeight: '600' }}>
-              {(profile?.fullName || firebaseUser?.displayName || 'SV').split(/\s+/).slice(-2).map((part) => part[0]).join('').toUpperCase()}
-            </Text>
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.itemTitle}>{profile?.fullName || firebaseUser?.displayName || 'Sinh viên'}</Text>
-            <Text style={styles.itemSub}>
-              {profile?.email || firebaseUser?.email || ''} • CPA mục tiêu: {Number(profile?.targetGpa ?? 3.2).toFixed(2)}
-            </Text>
-          </View>
-        </View>
-
-        <View
-          style={{
-            backgroundColor: COLORS.greenLight,
-            paddingVertical: 10,
-            paddingHorizontal: 12,
-            borderRadius: 10,
-            alignItems: 'center',
-            marginBottom: 14,
-          }}
-        >
-          <Text style={{ fontSize: 12, fontWeight: '600', color: COLORS.green }}>
-            <Ionicons name="cloud-done-outline" size={12} color={COLORS.green} /> Dữ liệu tài khoản được tải từ Firestore
-          </Text>
-        </View>
-
-        {!!profileNotice && (
-          <Text style={{ fontSize: 11, fontWeight: '600', color: COLORS.green, marginBottom: 10 }}>{profileNotice}</Text>
-        )}
-
-        <View style={styles.rowGap}>
-          <TouchableOpacity
-            style={[styles.secondaryBtn, { borderColor: COLORS.blue, backgroundColor: COLORS.blueLight }]}
-            onPress={exportGradeData}
-          >
-            <Text style={{ color: COLORS.blue, fontWeight: '600', fontSize: 12 }}>
-              <Ionicons name="document-text-outline" size={12} color={COLORS.blue} /> Xuất CSV / PDF
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.secondaryBtn, { borderColor: COLORS.danger, backgroundColor: COLORS.dangerLight }]}
-            onPress={handleLogout}
-          >
-            <Text style={{ color: COLORS.danger, fontWeight: '600', fontSize: 12 }}>
-              <Ionicons name="log-out-outline" size={12} color={COLORS.danger} /> Đăng xuất
-            </Text>
-          </TouchableOpacity>
-        </View>
       </View>
     </ScrollView>
   );
@@ -2146,7 +2137,7 @@ export default function App() {
       {currentScreen === 7 && renderScreen7AddCourse()}
       {currentScreen === 8 && renderScreen8EditCourseAndGrade()}
       {currentScreen === 9 && renderScreen9Calculator()}
-      {currentScreen === 10 && renderScreen10RemindersProfile()}
+      {currentScreen === 10 && renderScreen10Reminders()}
       {currentScreen === 11 && renderScreen11AddExamReminder()}
       {currentScreen === 12 && renderScreen12ForgotPassword()}
       {currentScreen === 13 && renderScreen13NotificationDetail()}
@@ -2258,6 +2249,105 @@ export default function App() {
                 </Text>
               </TouchableOpacity>
             </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* MODAL HỒ SƠ CÁ NHÂN - mở từ avatar ở góc phải trang Tổng quan */}
+      <Modal
+        visible={isProfileModalOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setIsProfileModalOpen(false)}
+      >
+        <View style={styles.deleteDialogBackdrop}>
+          <TouchableOpacity
+            style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }}
+            activeOpacity={1}
+            accessibilityRole="button"
+            accessibilityLabel="Đóng hồ sơ khi bấm ra ngoài"
+            onPress={() => setIsProfileModalOpen(false)}
+          />
+          <View style={styles.deleteDialog}>
+            <View style={[styles.rowBetween, { marginBottom: 14 }]}>
+              <Text style={styles.deleteDialogTitle}>Hồ sơ cá nhân</Text>
+              <TouchableOpacity
+                accessibilityRole="button"
+                accessibilityLabel="Đóng hồ sơ cá nhân"
+                style={{ outlineStyle: 'none' }}
+                onPress={() => setIsProfileModalOpen(false)}
+              >
+                <Ionicons name="close" size={20} color={COLORS.textMuted} />
+              </TouchableOpacity>
+            </View>
+
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 14 }}>
+              <View
+                style={{
+                  width: 52,
+                  height: 52,
+                  borderRadius: 26,
+                  backgroundColor: COLORS.blue,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  marginRight: 12,
+                }}
+              >
+                <Text style={{ color: COLORS.white, fontSize: 16, fontWeight: '700' }}>
+                  {(profile?.fullName || firebaseUser?.displayName || 'SV').split(/\s+/).slice(-2).map((part) => part[0]).join('').toUpperCase()}
+                </Text>
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.itemTitle}>{profile?.fullName || firebaseUser?.displayName || 'Sinh viên'}</Text>
+                <Text style={styles.itemSub}>{profile?.email || firebaseUser?.email || ''}</Text>
+              </View>
+            </View>
+
+            <View style={{ backgroundColor: COLORS.bg, borderRadius: 10, padding: 12, marginBottom: 12 }}>
+              <View style={styles.rowBetween}>
+                <Text style={{ fontSize: 12, color: COLORS.textMuted }}>GPA mục tiêu</Text>
+                <Text style={{ fontSize: 14, fontWeight: '700', color: COLORS.blue }}>
+                  {Number(profile?.targetGpa ?? 3.2).toFixed(2)}
+                </Text>
+              </View>
+            </View>
+
+            <View
+              style={{
+                backgroundColor: COLORS.greenLight,
+                paddingVertical: 10,
+                paddingHorizontal: 12,
+                borderRadius: 10,
+                alignItems: 'center',
+                marginBottom: 4,
+              }}
+            >
+              <Text style={{ fontSize: 12, fontWeight: '600', color: COLORS.green }}>
+                <Ionicons name="cloud-done-outline" size={12} color={COLORS.green} /> Dữ liệu tài khoản được tải từ Firestore
+              </Text>
+            </View>
+
+            <TouchableOpacity
+              style={{
+                marginTop: 14,
+                paddingVertical: 12,
+                borderRadius: 10,
+                borderWidth: 1,
+                borderColor: COLORS.danger,
+                backgroundColor: COLORS.dangerLight,
+                alignItems: 'center',
+              }}
+              accessibilityRole="button"
+              accessibilityLabel="Đăng xuất"
+              onPress={() => {
+                setIsProfileModalOpen(false);
+                handleLogout();
+              }}
+            >
+              <Text style={{ color: COLORS.danger, fontWeight: '600', fontSize: 13 }}>
+                <Ionicons name="log-out-outline" size={14} color={COLORS.danger} /> Đăng xuất
+              </Text>
+            </TouchableOpacity>
           </View>
         </View>
       </Modal>

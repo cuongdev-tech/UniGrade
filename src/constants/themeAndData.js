@@ -27,9 +27,9 @@ export const INITIAL_USER_PROFILE = {
   accumulatedCredits: 85,   // Đã tích lũy (Không tính môn trượt điểm F < 4.0)
   remainingCredits: 45,     // Số tín chỉ còn lại = 130 - 85
   currentSemestersCount: 5,
-  cpa4: 3.45,
-  cpa10: 8.32,
-  targetCpa: 3.20,
+  gpa4: 3.45,
+  gpa10: 8.32,
+  targetGpa: 3.20,
 };
 
 export const INITIAL_SEMESTERS = [

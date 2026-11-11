@@ -42,12 +42,13 @@ export const fromFirestore = (snapshot) => {
 };
 
 // Ghi học kỳ mới. Giữ nguyên giá trị đầu vào (không chuẩn hóa) như code cũ.
+// status: 'Đang học' -> learning, 'Hoàn thành' -> completed.
 export const toFirestore = (semesterId, uid, semester) => ({
   semester_id: semesterId,
   user_id: uid,
   semester_name: semester.rawName,
   academic_year: semester.year,
-  status: 'learning',
+  status: semester.status === 'Hoàn thành' ? 'completed' : 'learning',
   semester_gpa_4: null,
   semester_avg_10: null,
   earned_credits: 0,

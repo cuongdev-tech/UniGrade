@@ -19,6 +19,7 @@ import {
   createSemesterRecord,
   createUserProfile,
   deleteCourseAndReminders,
+  ensureSemesterRecord,
   loadUserWorkspace,
   acknowledgeReminderRecord,
   updateCourseRecord,
@@ -29,11 +30,21 @@ import {
   parseGradeValue,
   isGradeValueInvalid,
   getGradeLetter,
+  parseLetterGrade,
   calcCourseTotal,
   getRankByGPA,
   calcSemesterStats,
   hasFinalSemesterGpa,
 } from '../services/gradeService';
+import {
+  parseGradeSheet,
+  applyImportedGrades,
+  getImportedSubjectIds,
+  buildGradeFormula,
+  buildCourseFromImportRow,
+  buildSemesterId,
+  parseSemesterLabel,
+} from '../services/gradeImportService';
 import {
   EMAIL_ALREADY_EXISTS_MESSAGE,
   getFirebaseErrorMessage,
@@ -89,6 +100,8 @@ export function useUniGradeViewModel() {
   const [selectedSemesterFilter, setSelectedSemesterFilter] = useState('all'); // all | hk1 | hk2
   const [selectedStatusFilter, setSelectedStatusFilter] = useState('all');     // all | passed | pending
   const [gradeImportMessage, setGradeImportMessage] = useState('');
+  const [gradeImportMessageType, setGradeImportMessageType] = useState('success');
+  const gradeImportMessageTimer = useRef(null);
   const [courseActionNotice, setCourseActionNotice] = useState(null);
   const courseActionNoticeTimer = useRef(null);
   const [semesters, setSemesters] = useState([]);
@@ -139,6 +152,7 @@ export function useUniGradeViewModel() {
   });
   const [reminderFormError, setReminderFormError] = useState('');
   const [profileNotice, setProfileNotice] = useState('');
+  const profileNoticeTimer = useRef(null);
 
   useEffect(() => {
     let unsubscribe;
@@ -332,8 +346,14 @@ export function useUniGradeViewModel() {
   const TOTAL_PROGRAM_CREDITS = profile?.totalProgramCredits || 130;
   const TOTAL_PROGRAM_SEMESTERS = profile?.totalProgramSemesters || 8;
 
-  const formatSemesterGpa = (stats) => hasFinalSemesterGpa(stats) ? stats.gpa.toFixed(2) : '--';
-  const formatSemesterAverage = (stats) => hasFinalSemesterGpa(stats) ? stats.avg10.toFixed(2) : '--';
+  // Học kỳ đã có điểm nhưng chưa đủ 100% môn -> GPA tạm tính.
+  const isSemesterGpaProvisional = (stats) =>
+    stats.count > 0 && stats.gradedCount > 0 && !hasFinalSemesterGpa(stats);
+
+  const formatSemesterGpa = (stats) =>
+    hasFinalSemesterGpa(stats) ? stats.gpa.toFixed(2) : isSemesterGpaProvisional(stats) ? `${stats.gpa.toFixed(2)}*` : '--';
+  const formatSemesterAverage = (stats) =>
+    hasFinalSemesterGpa(stats) ? stats.avg10.toFixed(2) : isSemesterGpaProvisional(stats) ? `${stats.avg10.toFixed(2)}*` : '--';
 
   const semesterStats = semesters.map((sem) => ({
     ...sem,
@@ -364,7 +384,36 @@ export function useUniGradeViewModel() {
 
   useEffect(() => () => {
     if (courseActionNoticeTimer.current) clearTimeout(courseActionNoticeTimer.current);
+    if (profileNoticeTimer.current) clearTimeout(profileNoticeTimer.current);
+    if (gradeImportMessageTimer.current) clearTimeout(gradeImportMessageTimer.current);
   }, []);
+
+  // Thông báo nhập điểm: đỏ khi lỗi, xanh khi thành công, tự ẩn sau 5 giây.
+  const showGradeImportMessage = (message, type = 'error') => {
+    if (gradeImportMessageTimer.current) clearTimeout(gradeImportMessageTimer.current);
+    setGradeImportMessage(message);
+    setGradeImportMessageType(type);
+    gradeImportMessageTimer.current = setTimeout(() => {
+      setGradeImportMessage('');
+      gradeImportMessageTimer.current = null;
+    }, 5000);
+  };
+
+  const clearGradeImportMessage = () => {
+    if (gradeImportMessageTimer.current) clearTimeout(gradeImportMessageTimer.current);
+    gradeImportMessageTimer.current = null;
+    setGradeImportMessage('');
+  };
+
+  // Thông báo ngắn (5 giây) rồi tự ẩn.
+  const showProfileNotice = (message) => {
+    if (profileNoticeTimer.current) clearTimeout(profileNoticeTimer.current);
+    setProfileNotice(message);
+    profileNoticeTimer.current = setTimeout(() => {
+      setProfileNotice('');
+      profileNoticeTimer.current = null;
+    }, 5000);
+  };
 
   const showCourseActionNotice = (notice) => {
     if (courseActionNoticeTimer.current) clearTimeout(courseActionNoticeTimer.current);
@@ -673,25 +722,27 @@ export function useUniGradeViewModel() {
 
   const exportGradeData = () => {
     const escapeCsv = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
-    const rows = subjects.map((item) =>
-      [
+    const scoreCell = (value) => (parseGradeValue(value) === null ? '' : String(value));
+    const rows = subjects.map((item) => {
+      const letterInfo = parseLetterGrade(item.badge);
+      const total = parseGradeValue(item.total);
+      return [
+        item.semester,
         item.name,
         item.credits,
-        item.semester,
-        `${item.weights.cc}%`,
-        `${item.weights.gk}%`,
-        `${item.weights.ck}%`,
-        item.cc,
-        item.gk,
-        item.ck,
-        item.total,
-        item.badge,
+        buildGradeFormula(item.weights),
+        scoreCell(item.cc),
+        scoreCell(item.gk),
+        scoreCell(item.ck),
+        total === null ? '' : total.toFixed(2),
+        letterInfo ? letterInfo.point.toFixed(1) : '',
+        letterInfo ? letterInfo.letter : '',
       ]
         .map(escapeCsv)
-        .join(',')
-    );
+        .join(',');
+    });
     const csv = [
-      'Môn học,Tín chỉ,Học kỳ,Trọng số CC,Trọng số GK,Trọng số CK,Điểm CC,Điểm GK,Điểm CK,Tổng kết,Xếp loại',
+      'Kỳ/Năm học,Tên môn học,Số TC,Công thức điểm,CC,GK,CK,Thang 10,Thang 4,Chữ',
       ...rows,
     ].join('\n');
 
@@ -705,14 +756,16 @@ export function useUniGradeViewModel() {
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
-      setProfileNotice('Đã xuất file CSV. (Xuất PDF cần thêm thư viện in ấn.)');
+      showProfileNotice('Đã xuất file CSV.');
     } else {
-      setProfileNotice('Đã tạo dữ liệu CSV (bản demo). Xuất PDF cần thêm thư viện.');
+      showProfileNotice('Đã xuất file CSV.');
     }
   };
 
   const importGradesFromFile = async () => {
-    setGradeImportMessage('');
+    clearGradeImportMessage();
+    const createdSemesters = [];
+    const createdSubjects = [];
     try {
       const selection = await DocumentPicker.getDocumentAsync({
         type: [
@@ -726,7 +779,7 @@ export function useUniGradeViewModel() {
       const file = selection.assets[0];
       const isExcelFile = /\.(xls|xlsx)$/i.test(file.name || file.uri);
       if (!isExcelFile) {
-        setGradeImportMessage('Vui lòng chọn file Excel có định dạng .xls hoặc .xlsx.');
+        showGradeImportMessage('Vui lòng chọn file Excel có định dạng .xls hoặc .xlsx.', 'error');
         return;
       }
 
@@ -744,7 +797,7 @@ export function useUniGradeViewModel() {
       });
       const firstSheetName = workbook.SheetNames[0];
       if (!firstSheetName) {
-        setGradeImportMessage('File Excel không có trang tính để nhập.');
+        showGradeImportMessage('File Excel không có trang tính để nhập.', 'error');
         return;
       }
 
@@ -753,116 +806,107 @@ export function useUniGradeViewModel() {
         defval: '',
         raw: false,
       });
-      const normalizeHeader = (value) =>
-        String(value)
-          .normalize('NFD')
-          .replace(/[\u0300-\u036f]/g, '')
-          .toLowerCase()
-          .replace(/[^a-z0-9]/g, '');
-      const headerAliases = {
-        name: ['tenmonhoc', 'monhoc', 'tenhocphan', 'hocphan', 'subject', 'course'],
-        cc: ['cc', 'diemcc', 'chuyencan', 'diemchuyencan'],
-        gk: ['gk', 'diemgk', 'giuaky', 'diemgiuaky'],
-        ck: ['ck', 'diemck', 'cuoiky', 'diemcuoiky'],
-      };
-
-      let headerRowIndex = -1;
-      let columns = {};
-      for (let rowIndex = 0; rowIndex < Math.min(rows.length, 10); rowIndex += 1) {
-        const headers = rows[rowIndex].map(normalizeHeader);
-        const foundColumns = {};
-        Object.entries(headerAliases).forEach(([key, aliases]) => {
-          foundColumns[key] = headers.findIndex((header) => aliases.includes(header));
-        });
-        if (foundColumns.name !== -1 && ['cc', 'gk', 'ck'].some((key) => foundColumns[key] !== -1)) {
-          headerRowIndex = rowIndex;
-          columns = foundColumns;
-          break;
-        }
-      }
-      if (headerRowIndex === -1) {
-        setGradeImportMessage('Không nhận diện được tiêu đề cột. Cần có Tên môn học và ít nhất một cột CC, GK hoặc CK.');
-        return;
-      }
-
-      const subjectByName = new Map(
-        subjects.map((subject) => [
-          normalizeHeader(subject.name),
-          subject,
-        ])
-      );
-      const importedGrades = new Map();
-      let skippedRows = 0;
-      for (const row of rows.slice(headerRowIndex + 1)) {
-        const name = String(row[columns.name] || '').trim();
-        if (!name) continue;
-
-        const subject = subjectByName.get(normalizeHeader(name));
-        if (!subject) {
-          skippedRows += 1;
-          continue;
-        }
-
-        const nextGrades = importedGrades.get(subject.id) || {};
-        let hasGrade = false;
-        let invalidGrade = false;
-        ['cc', 'gk', 'ck'].forEach((key) => {
-          const columnIndex = columns[key];
-          if (columnIndex === -1 || String(row[columnIndex] ?? '').trim() === '') return;
-          const grade = parseGradeValue(row[columnIndex]);
-          if (grade === null || grade < 0 || grade > 10) {
-            invalidGrade = true;
-            return;
-          }
-          nextGrades[key] = grade.toFixed(1);
-          hasGrade = true;
-        });
-        if (!hasGrade || invalidGrade) {
-          skippedRows += 1;
-          continue;
-        }
-        importedGrades.set(subject.id, nextGrades);
-      }
-
-      if (importedGrades.size === 0) {
-        setGradeImportMessage('Không có điểm hợp lệ để nhập. Kiểm tra tên môn và điểm trong file.');
-        return;
-      }
-
-      const updatedSubjects = subjects.map((subject) => {
-        const imported = importedGrades.get(subject.id);
-        if (!imported) return subject;
-
-        const grades = {
-          cc: parseGradeValue(subject.cc) === null ? '' : String(subject.cc),
-          gk: parseGradeValue(subject.gk) === null ? '' : String(subject.gk),
-          ck: parseGradeValue(subject.ck) === null ? '' : String(subject.ck),
-          ...imported,
-        };
-        const total = calcCourseTotal(grades, subject.weights);
-        const missingParts = ['cc', 'gk', 'ck'].filter(
-          (key) => Number(subject.weights[key]) > 0 && parseGradeValue(grades[key]) === null
+      const importResult = parseGradeSheet(rows, subjects);
+      if (importResult.headerRowIndex === -1) {
+        showGradeImportMessage(
+          'Không nhận diện được tiêu đề cột. Cần có Tên môn học và ít nhất một cột điểm (CC/QT/BT, GK, CK, Thang 10, Thang 4 hoặc Chữ).',
+          'error'
         );
-        const grade = total === null ? null : getGradeLetter(total);
+        return;
+      }
 
-        return {
-          ...subject,
-          cc: grades.cc || 'Chưa nhập',
-          gk: grades.gk || 'Chưa nhập',
-          ck: grades.ck || 'Chưa nhập',
-          total: total === null ? '--' : total.toFixed(2),
-          status: grade ? grade.status : 'pending',
-          badge: grade ? grade.text : missingParts.length ? `Chờ nhập ${missingParts.join('/')}` : 'Chờ điểm',
-        };
+      const importedSubjectIds = getImportedSubjectIds(importResult);
+      const newCourseRows = importResult.newCourses || [];
+      if (importedSubjectIds.size === 0 && newCourseRows.length === 0) {
+        showGradeImportMessage(
+          'Không có điểm hợp lệ để nhập. Kiểm tra lại Tên môn học, Kỳ/Năm học và điểm trong file có khớp với app không (môn mới cần thêm Số TC).',
+          'error'
+        );
+        return;
+      }
+
+      // Tìm học kỳ đã có theo khóa "hocky<term><start><end>"; chưa có thì tạo mới ở trạng thái Hoàn thành.
+      // Nhờ vậy đang học 2026-2027 vẫn nhập được điểm năm 1 (2024-2025) / năm 2 (2025-2026).
+      const semesterByCanonical = new Map();
+      semesters.forEach((semester) => {
+        const label = parseSemesterLabel(`${semester.rawName} ${semester.year}`);
+        if (label) semesterByCanonical.set(label.canonical, semester);
       });
-      await updateCourseRecords(updatedSubjects.filter((subject) => importedGrades.has(subject.id)));
-      setSubjects(updatedSubjects);
-      setGradeImportMessage(
-        `Đã nhập điểm cho ${importedGrades.size} môn.${skippedRows ? ` Bỏ qua ${skippedRows} dòng không khớp hoặc không hợp lệ.` : ''}`
+
+      for (const row of newCourseRows) {
+        const info = row.semesterInfo;
+        const semesterId = buildSemesterId(info);
+        // Ưu tiên học kỳ đã có trong app (theo tên/năm hoặc theo mã cố định).
+        let semester = semesterByCanonical.get(info.canonical)
+          || semesters.find((item) => item.id === semesterId);
+        if (!semester) {
+          const newSemester = {
+            name: `Học kỳ ${info.term} (${info.startYear} - ${info.endYear})`,
+            rawName: `Học kỳ ${info.term}`,
+            year: `${info.startYear} - ${info.endYear}`,
+            status: 'Hoàn thành',
+          };
+          newSemester.id = await ensureSemesterRecord(firebaseUser.uid, semesterId, newSemester);
+          semester = newSemester;
+          semesterByCanonical.set(info.canonical, semester);
+          createdSemesters.push(semester);
+        }
+
+        const newCourse = buildCourseFromImportRow(row, semester);
+        newCourse.id = await createCourseRecord(newCourse);
+        createdSubjects.push(newCourse);
+      }
+
+      // Tách môn có điểm với môn chỉ cập nhật Số TC để báo đúng việc đã làm.
+      const importedGradeIds = new Set(importResult.gradesBySubject.keys());
+      [importResult.total10BySubject, importResult.total4BySubject, importResult.letterBySubject].forEach((map) => {
+        if (map) map.forEach((_value, key) => importedGradeIds.add(key));
+      });
+      const creditsOnlyCount = importedSubjectIds.size - importedGradeIds.size;
+
+      const updatedSubjects = applyImportedGrades(subjects, importResult);
+      if (importedSubjectIds.size > 0) {
+        await updateCourseRecords(
+          updatedSubjects.filter((subject) => importedSubjectIds.has(subject.id))
+        );
+      }
+      setSubjects([...updatedSubjects, ...createdSubjects]);
+      if (createdSemesters.length > 0) {
+        setSemesters((current) => [...current, ...createdSemesters]);
+      }
+
+      const summaryParts = [];
+      if (importedGradeIds.size > 0) {
+        summaryParts.push(`Đã nhập điểm cho ${importedGradeIds.size} môn`);
+      }
+      if (creditsOnlyCount > 0) {
+        summaryParts.push(`Đã cập nhật tín chỉ cho ${creditsOnlyCount} môn`);
+      }
+      if (createdSubjects.length > 0) {
+        summaryParts.push(
+          createdSemesters.length > 0
+            ? `Đã tạo ${createdSubjects.length} học phần và ${createdSemesters.length} học kỳ mới`
+            : `Đã tạo ${createdSubjects.length} học phần mới`
+        );
+      }
+      const importSummary = summaryParts.length > 0
+        ? `${summaryParts.join(', ')}.`
+        : 'Không có thay đổi nào được ghi.';
+      showGradeImportMessage(
+        `${importSummary}${importResult.skippedRows ? ` Bỏ qua ${importResult.skippedRows} dòng không khớp hoặc không hợp lệ.` : ''}`,
+        'success'
       );
     } catch (error) {
-      setGradeImportMessage(
-        `Không thể nhập file Excel: ${error instanceof Error ? error.message : 'Lỗi không xác định.'}`
+      // Giữ lại các học kỳ/học phần đã tạo thành công trước khi lỗi để không lệch với Firestore.
+      if (createdSemesters.length > 0) {
+        setSemesters((current) => [...current, ...createdSemesters]);
+      }
+      if (createdSubjects.length > 0) {
+        setSubjects((current) => [...current, ...createdSubjects]);
+      }
+      showGradeImportMessage(
+        `Không thể nhập file Excel: ${error instanceof Error ? error.message : 'Lỗi không xác định.'}`,
+        'error'
       );
     }
   };
@@ -922,6 +966,7 @@ export function useUniGradeViewModel() {
     selectedStatusFilter,
     setSelectedStatusFilter,
     gradeImportMessage,
+    gradeImportMessageType,
     setGradeImportMessage,
     courseActionNotice,
     setCourseActionNotice,
@@ -998,6 +1043,7 @@ export function useUniGradeViewModel() {
     TOTAL_PROGRAM_SEMESTERS,
     formatSemesterGpa,
     formatSemesterAverage,
+    isSemesterGpaProvisional,
     semesterStats,
     overallStats,
     remainingCredits,

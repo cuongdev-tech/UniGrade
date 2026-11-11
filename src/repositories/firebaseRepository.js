@@ -60,6 +60,24 @@ export async function createSemesterRecord(uid, semester, previousSemesterIds) {
   return semesterId;
 }
 
+// Đảm bảo học kỳ lịch sử tồn tại với mã cố định (sem_hk1_2425...).
+// Không tạo trùng, không đụng tới học kỳ đang học hiện tại.
+export async function ensureSemesterRecord(uid, semesterId, semester) {
+  const { db } = getFirebaseServices();
+  const reference = doc(db, 'semesters', semesterId);
+  try {
+    const snapshot = await getDoc(reference);
+    if (snapshot.exists()) return semesterId;
+  } catch {
+    // Firestore rules có thể chặn đọc document chưa tồn tại -> cứ tạo bên dưới.
+  }
+  await setDoc(
+    reference,
+    semesterModel.toFirestore(semesterId, uid, { ...semester, status: 'Hoàn thành' })
+  );
+  return semesterId;
+}
+
 export async function createCourseRecord(course) {
   const { db } = getFirebaseServices();
   const reference = doc(collection(db, 'courses'));

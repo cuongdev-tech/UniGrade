@@ -100,7 +100,9 @@ export const styles = StyleSheet.create({
   courseActionNoticeErrorText: { color: COLORS.danger },
   courseActionNoticeInfoText: { color: COLORS.blue },
   importGradesHint: { color: COLORS.textMuted, fontSize: 11, marginBottom: 9 },
-  importGradesMessage: { color: COLORS.green, fontSize: 12, fontWeight: '600', marginBottom: 9 },
+  importGradesMessage: { fontSize: 12, fontWeight: '600', marginBottom: 9 },
+  importGradesMessageSuccess: { color: COLORS.green },
+  importGradesMessageError: { color: COLORS.danger },
   subjectCard: {
     backgroundColor: COLORS.white, borderColor: '#D9E2EF', borderWidth: 1,
     borderRadius: 16, padding: 16, marginBottom: 12,
@@ -273,7 +275,7 @@ export const styles = StyleSheet.create({
   semesterFilterOptionTextActive: { color: COLORS.white },
   chartBox: {
     flexDirection: 'row', justifyContent: 'space-around', alignItems: 'flex-end',
-    backgroundColor: COLORS.bg, padding: 12, borderRadius: 12, height: 110, marginTop: 6,
+    backgroundColor: COLORS.bg, padding: 12, borderRadius: 12, minHeight: 110, marginTop: 6,
   },
   gradeGrid4: {
     flexDirection: 'row', backgroundColor: COLORS.bg, borderRadius: 10, paddingVertical: 8, marginTop: 8,

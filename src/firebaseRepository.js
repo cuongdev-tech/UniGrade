@@ -31,6 +31,34 @@ const normalizeStatus = (value) => {
   return value || 'Đang học';
 };
 
+// Bảng quy đổi điểm chữ ↔ hệ 4, khớp với getGradeLetter() trong App.js.
+const LETTER_POINTS = {
+  'A+': 4.0,
+  A: 3.7,
+  'B+': 3.5,
+  B: 3.0,
+  'C+': 2.5,
+  C: 2.0,
+  'D+': 1.5,
+  D: 1.0,
+  F: 0,
+};
+
+// "A+ (4.0)" -> "A+" ; "Chờ nhập CK" -> null
+const toLetterGrade = (badge) => {
+  const letter = String(badge || '').trim().split(/\s+/)[0];
+  return Object.prototype.hasOwnProperty.call(LETTER_POINTS, letter) ? letter : null;
+};
+
+// "A+" -> "A+ (4.0)" ; giá trị cũ "A+ (4.0)" giữ nguyên để không đổi giao diện
+const toLetterBadge = (value) => {
+  const letter = String(value || '').trim();
+  if (Object.prototype.hasOwnProperty.call(LETTER_POINTS, letter)) {
+    return `${letter} (${LETTER_POINTS[letter].toFixed(1)})`;
+  }
+  return letter || null;
+};
+
 const mapSemester = (snapshot) => {
   const data = snapshot.data();
   const rawName = firstValue(data, ['semester_name', 'name', 'semesterName'], 'Học kỳ');
@@ -46,18 +74,18 @@ const mapSemester = (snapshot) => {
 
 const mapCourse = (snapshot, semester) => {
   const data = snapshot.data();
-  const cc = firstValue(data, ['cc_score', 'score_cc', 'attendance_score', 'attendance_grade', 'grade_cc', 'cc']);
-  const gk = firstValue(data, ['gk_score', 'score_gk', 'midterm_score', 'midterm_grade', 'grade_gk', 'gk']);
-  const ck = firstValue(data, ['ck_score', 'score_ck', 'final_score', 'final_exam_grade', 'grade_ck', 'ck']);
-  const total = firstValue(data, ['total_score', 'total_grade', 'final_grade', 'total']);
+  const cc = firstValue(data, ['score_cc', 'cc_score', 'attendance_score', 'attendance_grade', 'grade_cc', 'cc']);
+  const gk = firstValue(data, ['score_gk', 'gk_score', 'midterm_score', 'midterm_grade', 'grade_gk', 'gk']);
+  const ck = firstValue(data, ['score_ck', 'ck_score', 'final_score', 'final_exam_grade', 'grade_ck', 'ck']);
+  const total = firstValue(data, ['total_10', 'total_score', 'total_grade', 'final_grade', 'total']);
   const weights = {
-    cc: String(firstValue(data, ['cc_weight', 'weight_cc', 'attendance_weight', 'weight_attendance'], 10)),
-    gk: String(firstValue(data, ['gk_weight', 'weight_gk', 'midterm_weight', 'weight_midterm'], 30)),
-    ck: String(firstValue(data, ['ck_weight', 'weight_ck', 'final_weight', 'weight_final'], 60)),
+    cc: String(firstValue(data, ['weight_cc', 'cc_weight', 'attendance_weight', 'weight_attendance'], 10)),
+    gk: String(firstValue(data, ['weight_gk', 'gk_weight', 'midterm_weight', 'weight_midterm'], 30)),
+    ck: String(firstValue(data, ['weight_ck', 'ck_weight', 'final_weight', 'weight_final'], 60)),
   };
   const statusValue = firstValue(data, ['status', 'course_status'], 'pending');
   const status = ['passed', 'failed', 'pending'].includes(statusValue) ? statusValue : 'pending';
-  const letter = firstValue(data, ['letter_grade', 'grade_letter', 'grade'], null);
+  const letter = toLetterBadge(firstValue(data, ['letter_grade', 'grade_letter', 'grade'], null));
   return {
     id: snapshot.id,
     name: firstValue(data, ['course_name', 'name', 'subject_name'], 'Môn học'),
@@ -88,7 +116,7 @@ const formatDateForDatabase = (value) => {
 
 const mapReminder = (snapshot, course) => {
   const data = snapshot.data();
-  const dbType = String(firstValue(data, ['type', 'exam_type'], 'ck')).toLowerCase();
+  const dbType = String(firstValue(data, ['reminder_type', 'type', 'exam_type'], 'ck')).toLowerCase();
   return {
     id: snapshot.id,
     courseId: course.id,
@@ -96,9 +124,9 @@ const mapReminder = (snapshot, course) => {
     credits: course.credits,
     semesterLabel: course.semester,
     type: ['gk', 'mid', 'midterm'].includes(dbType) ? 'mid' : 'final',
-    date: formatDateForUi(firstValue(data, ['date', 'exam_date'], '')),
-    time: firstValue(data, ['time', 'exam_time'], ''),
-    room: firstValue(data, ['room', 'exam_room'], ''),
+    date: formatDateForUi(firstValue(data, ['exam_date', 'date'], '')),
+    time: firstValue(data, ['exam_time', 'time'], ''),
+    room: firstValue(data, ['exam_room', 'room'], ''),
     note: firstValue(data, ['note', 'description'], ''),
     advance: firstValue(data, ['advance', 'remind_before'], '1d'),
   };
@@ -117,7 +145,7 @@ export async function loadUserWorkspace(uid) {
     email: firstValue(profileData, ['email'], ''),
     totalProgramCredits: numericValue(firstValue(profileData, ['total_program_credits', 'total_credits'], 130), 130),
     totalProgramSemesters: numericValue(firstValue(profileData, ['total_program_semesters', 'total_semesters'], 8), 8),
-    targetGpa: numericValue(firstValue(profileData, ['target_gpa_4', 'target_gpa', 'target_cpa'], 3.2), 3.2),
+    targetGpa: numericValue(firstValue(profileData, ['target_gpa', 'target_gpa_4', 'target_cpa'], 3.2), 3.2),
   };
 
   const semesterSnapshots = await getDocs(
@@ -161,28 +189,32 @@ export async function createSemesterRecord(uid, semester, previousSemesterIds) {
     academic_year: semester.year,
     status: 'learning',
     semester_gpa_4: null,
-    semester_average_10: null,
+    semester_avg_10: null,
     earned_credits: 0,
   });
   await batch.commit();
   return semesterId;
 }
 
-const courseRecord = (course) => ({
-  course_id: course.id,
-  semester_id: course.sem,
-  course_name: course.name,
-  credits: course.credits,
-  cc_weight: numericValue(course.weights.cc),
-  gk_weight: numericValue(course.weights.gk),
-  ck_weight: numericValue(course.weights.ck),
-  cc_score: course.cc === 'Chưa nhập' ? null : numericValue(course.cc, null),
-  gk_score: course.gk === 'Chưa nhập' ? null : numericValue(course.gk, null),
-  ck_score: course.ck === 'Chưa nhập' ? null : numericValue(course.ck, null),
-  total_score: course.total === '--' ? null : numericValue(course.total, null),
-  letter_grade: course.badge,
-  status: course.status,
-});
+const courseRecord = (course) => {
+  const letter = toLetterGrade(course.badge);
+  return {
+    course_id: course.id,
+    semester_id: course.sem,
+    course_name: course.name,
+    credits: course.credits,
+    weight_cc: numericValue(course.weights.cc),
+    weight_gk: numericValue(course.weights.gk),
+    weight_ck: numericValue(course.weights.ck),
+    score_cc: course.cc === 'Chưa nhập' ? null : numericValue(course.cc, null),
+    score_gk: course.gk === 'Chưa nhập' ? null : numericValue(course.gk, null),
+    score_ck: course.ck === 'Chưa nhập' ? null : numericValue(course.ck, null),
+    total_10: course.total === '--' ? null : numericValue(course.total, null),
+    total_4: letter === null ? null : LETTER_POINTS[letter],
+    letter_grade: letter,
+    status: course.status,
+  };
+};
 
 export async function createCourseRecord(course) {
   const { db } = getFirebaseServices();
@@ -225,10 +257,10 @@ export async function createReminderRecord(reminder) {
   await setDoc(reference, {
     reminder_id: reminderId,
     course_id: reminder.courseId,
-    type: reminder.type === 'mid' ? 'gk' : 'ck',
-    date: formatDateForDatabase(reminder.date),
-    time: reminder.time,
-    room: reminder.room,
+    reminder_type: reminder.type === 'mid' ? 'gk' : 'ck',
+    exam_date: formatDateForDatabase(reminder.date),
+    exam_time: reminder.time,
+    exam_room: reminder.room,
     note: reminder.note || null,
     advance: reminder.advance,
     is_acknowledged: false,
@@ -249,7 +281,7 @@ export async function createUserProfile(uid, profile) {
     email: profile.email,
     total_program_credits: profile.totalProgramCredits,
     total_program_semesters: profile.totalProgramSemesters,
-    target_gpa_4: profile.targetGpa,
+    target_gpa: profile.targetGpa,
     created_at: new Date().toISOString(),
   });
 }

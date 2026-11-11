@@ -611,9 +611,10 @@ export default function App() {
     const wc = Number(weights.cc) || 0;
     const wg = Number(weights.gk) || 0;
     const wk = Number(weights.ck) || 0;
-    if (cc === null || gk === null || ck === null) return null;
     if (wc + wg + wk !== 100) return null;
-    return (cc * wc + gk * wg + ck * wk) / 100;
+    // Đầu điểm có trọng số 0% thì không bắt buộc phải nhập.
+    if ((wc > 0 && cc === null) || (wg > 0 && gk === null) || (wk > 0 && ck === null)) return null;
+    return ((cc ?? 0) * wc + (gk ?? 0) * wg + (ck ?? 0) * wk) / 100;
   };
 
   const formatCourseMeta = (sub) => {
@@ -735,9 +736,9 @@ export default function App() {
     const grades = { ...editCourseGrades };
     const total = calcCourseTotal(grades, weights);
     const missingParts = [
-      parseGradeValue(grades.cc) === null ? 'CC' : null,
-      parseGradeValue(grades.gk) === null ? 'GK' : null,
-      parseGradeValue(grades.ck) === null ? 'CK' : null,
+      Number(weights.cc) > 0 && parseGradeValue(grades.cc) === null ? 'CC' : null,
+      Number(weights.gk) > 0 && parseGradeValue(grades.gk) === null ? 'GK' : null,
+      Number(weights.ck) > 0 && parseGradeValue(grades.ck) === null ? 'CK' : null,
     ].filter(Boolean);
 
     let status = 'pending';
@@ -1172,7 +1173,9 @@ export default function App() {
           ...imported,
         };
         const total = calcCourseTotal(grades, subject.weights);
-        const missingParts = ['cc', 'gk', 'ck'].filter((key) => parseGradeValue(grades[key]) === null);
+        const missingParts = ['cc', 'gk', 'ck'].filter(
+          (key) => Number(subject.weights[key]) > 0 && parseGradeValue(grades[key]) === null
+        );
         const grade = total === null ? null : getGradeLetter(total);
 
         return {
@@ -1182,7 +1185,7 @@ export default function App() {
           ck: grades.ck || 'Chưa nhập',
           total: total === null ? '--' : total.toFixed(2),
           status: grade ? grade.status : 'pending',
-          badge: grade ? grade.text : `Chờ nhập ${missingParts.join('/')}`,
+          badge: grade ? grade.text : missingParts.length ? `Chờ nhập ${missingParts.join('/')}` : 'Chờ điểm',
         };
       });
       await updateCourseRecords(updatedSubjects.filter((subject) => importedGrades.has(subject.id)));

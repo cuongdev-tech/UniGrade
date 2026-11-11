@@ -9,8 +9,8 @@ import {
   where,
   writeBatch,
 } from 'firebase/firestore';
-import { getFirebaseServices } from './firebase';
-import { userModel, semesterModel, courseModel, reminderModel } from './models';
+import { getFirebaseServices } from '../firebase';
+import { userModel, semesterModel, courseModel, reminderModel } from '../models';
 
 export async function loadUserWorkspace(uid) {
   const { db } = getFirebaseServices();

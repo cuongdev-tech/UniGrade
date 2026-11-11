@@ -24,7 +24,7 @@ import {
   acknowledgeReminderRecord,
   updateCourseRecord,
   updateCourseRecords,
-} from './src/firebaseRepository';
+} from './src/repositories/firebaseRepository';
 import { getFirebaseServices } from './src/firebase';
 import {
   parseGradeValue,

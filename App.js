@@ -8,7 +8,6 @@ import { styles } from './src/constants/styles';
 import { useUniGradeViewModel } from './src/viewmodels/useUniGradeViewModel';
 import {
   REMINDER_TYPES,
-  REMINDER_ADVANCES,
   getReminderTypeLabel,
   getReminderAdvanceLabel,
 } from './src/constants/config';
@@ -20,7 +19,10 @@ import {
   getRankByGPA,
   calcSemesterStats,
   hasFinalSemesterGpa,
+  formatComponentScore,
 } from './src/services/gradeService';
+import { getWhatIfForecast } from './src/services/forecastService';
+import { getReminderTypeSummary } from './src/services/reminderService';
 
 // Tự động nhúng font Inter chuẩn như trên Figma khi chạy trên trình duyệt Web (VS Code)
 const FONT_FAMILY = "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
@@ -52,6 +54,14 @@ import {
   Platform,
   Modal,
 } from 'react-native';
+
+// Các mức điểm tổng kết dùng cho ô chọn ở màn Dự báo What-if.
+const TARGET_GRADE_OPTIONS = [
+  { key: 'A+', label: 'A+ (9.0)', ten: 9.0, point: 4.0 },
+  { key: 'A', label: 'A (8.5)', ten: 8.5, point: 3.7 },
+  { key: 'B+', label: 'B+ (8.0)', ten: 8.0, point: 3.5 },
+  { key: 'B', label: 'B (7.0)', ten: 7.0, point: 3.0 },
+];
 
 // 1. BẢNG MÀU CHUẨN DESIGN SYSTEM
 // Đã chuyển sang src/constants/theme.js (dùng chung với styles.js).
@@ -319,6 +329,8 @@ export default function App() {
     setSelectedSemesterId,
     isWhatIfDropdownOpen,
     setIsWhatIfDropdownOpen,
+    isTargetGradeDropdownOpen,
+    setIsTargetGradeDropdownOpen,
     selectedWhatIfIndex,
     setSelectedWhatIfIndex,
     selectedTargetGrade,
@@ -352,6 +364,11 @@ export default function App() {
     setEditCourseGrades,
     isDeleteCourseDialogVisible,
     setIsDeleteCourseDialogVisible,
+    isConfirmSemesterDialogVisible,
+    isConfirmingSemester,
+    openConfirmSemesterDialog,
+    closeConfirmSemesterDialog,
+    confirmSemesterGrades,
     reminders,
     setReminders,
     selectedReminderId,
@@ -364,6 +381,18 @@ export default function App() {
     setReminderFormError,
     profileNotice,
     setProfileNotice,
+    isProfileEditOpen,
+    setIsProfileEditOpen,
+    profileTargetGpa,
+    setProfileTargetGpa,
+    profileTotalCredits,
+    setProfileTotalCredits,
+    profileEditError,
+    setProfileEditError,
+    isSavingProfile,
+    openProfileEdit,
+    closeProfileEdit,
+    saveProfileSettings,
     handleLogin,
     handleRegister,
     confirmRegister,
@@ -398,6 +427,7 @@ export default function App() {
     currentSemesterCourses,
     pendingCurrentCourses,
     reminderCourses,
+    reminderCourseOptions,
     whatIfCourses,
     openReminderDetail,
     saveNewReminder,
@@ -407,6 +437,21 @@ export default function App() {
 
   // Trạng thái UI cục bộ: modal Hồ sơ cá nhân mở từ avatar ở trang Tổng quan.
   const [isProfileModalOpen, setIsProfileModalOpen] = React.useState(false);
+
+  // Nhắc thi đã bấm "Đã nhận thông báo" sẽ được gỡ khỏi danh sách hiển thị.
+  const activeReminders = reminders.filter((reminder) => !reminder.isAcknowledged);
+  const targetGpa = Number(profile?.targetGpa ?? 3.2);
+  const isGpaBelowTarget = hasOverallGpa && overallStats.gpa < targetGpa;
+
+  const closeProfileModal = () => {
+    setIsProfileModalOpen(false);
+    closeProfileEdit();
+  };
+
+  const handleSaveProfile = async () => {
+    const saved = await saveProfileSettings();
+    if (saved) setIsProfileModalOpen(false);
+  };
 
   // ==========================================================================
   // MÀN HÌNH 1: ĐĂNG NHẬP (THÀNH VIÊN 3 - MÀU XANH LÁ)
@@ -646,6 +691,20 @@ export default function App() {
           </TouchableOpacity>
         </View>
       )}
+      {!!profileNotice && (
+        <View style={[styles.courseActionNotice, styles.courseActionNoticeSuccess]}>
+          <Text style={[styles.courseActionNoticeText, styles.courseActionNoticeSuccessText]}>
+            {profileNotice}
+          </Text>
+          <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel="Đóng thông báo hồ sơ"
+            onPress={() => setProfileNotice('')}
+          >
+            <Ionicons name="close" size={16} color={COLORS.green} />
+          </TouchableOpacity>
+        </View>
+      )}
       <View style={styles.rowBetween}>
         <View>
           <Text style={{ fontSize: 12, color: COLORS.textMuted }}>
@@ -700,6 +759,21 @@ export default function App() {
           * Không tính học phần trượt (Điểm F &lt; 4.0) vào TC tích lũy
         </Text>
       </View>
+
+      {/* Cảnh báo khi GPA tích lũy thấp hơn GPA mục tiêu trong hồ sơ */}
+      {isGpaBelowTarget && (
+        <View style={styles.gpaWarningCard}>
+          <Ionicons name="warning-outline" size={20} color={COLORS.danger} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.gpaWarningTitle}>GPA đang dưới mục tiêu</Text>
+            <Text style={styles.gpaWarningText}>
+              GPA tích lũy hiện tại {overallGpaText} thấp hơn mục tiêu {targetGpa.toFixed(2)} ({(
+                targetGpa - overallStats.gpa
+              ).toFixed(2)} điểm). Hãy cải thiện điểm ở các học kỳ tiếp theo nhé!
+            </Text>
+          </View>
+        </View>
+      )}
 
       {/* Biểu đồ xu hướng GPA các kỳ */}
       <View style={styles.card}>
@@ -866,8 +940,8 @@ export default function App() {
               {hasFinalSemesterGpa(sem.stats) ? ` (${getRankByGPA(sem.stats.gpa).text})` : ''}
             </Text>
           </View>
-          <View style={sem.status === 'Đang học' ? styles.badgeGreen : styles.badgeGray}>
-            <Text style={sem.status === 'Đang học' ? styles.badgeGreenText : styles.badgeGrayText}>{sem.status}</Text>
+          <View style={sem.status === 'Đang học' ? styles.badgeGreen : sem.status === 'Chưa xác nhận' ? styles.badgeAmber : styles.badgeGray}>
+            <Text style={sem.status === 'Đang học' ? styles.badgeGreenText : sem.status === 'Chưa xác nhận' ? styles.badgeAmberText : styles.badgeGrayText}>{sem.status}</Text>
           </View>
         </View>
       ))}
@@ -923,7 +997,31 @@ export default function App() {
         )}
       </View>
 
-      <Text style={styles.sectionTitle}>Điểm các môn trong Học kỳ ({detailCourses.length})</Text>
+      <View style={[styles.rowBetween, { marginTop: 8, marginBottom: 8 }]}>
+        <Text style={[styles.sectionTitle, { flex: 1, paddingRight: 8, marginVertical: 0 }]}>
+          Điểm các môn trong Học kỳ ({detailCourses.length})
+        </Text>
+        {sem.isConfirmed && (
+          <View style={styles.badgeGreen}>
+            <Text style={styles.badgeGreenText}>Đã xác nhận</Text>
+          </View>
+        )}
+        {sem.canConfirm && (
+          <TouchableOpacity
+            style={styles.confirmGradesButton}
+            accessibilityRole="button"
+            onPress={() => openConfirmSemesterDialog(sem.id)}
+          >
+            <Ionicons name="checkmark-circle" size={15} color={COLORS.white} />
+            <Text style={styles.confirmGradesButtonText}>Xác nhận điểm</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+      {sem.isConfirmed && (
+        <Text style={styles.lockedSemesterNotice}>
+          🔒 Học kỳ đã xác nhận điểm — không thể sửa hoặc xóa điểm.
+        </Text>
+      )}
       {detailCourses.map((course, index) => {
         const isFailed = course.status === 'failed';
         const isPending = course.status === 'pending';
@@ -942,11 +1040,49 @@ export default function App() {
               </View>
             </View>
             <Text style={styles.itemSub}>
-              CC: {course.cc} ({course.weights.cc}%) • GK: {course.gk} ({course.weights.gk}%) • CK: {course.ck} ({course.weights.ck}%)
+              CC: {formatComponentScore(course.cc, course.weights.cc)} ({course.weights.cc}%) • GK: {formatComponentScore(course.gk, course.weights.gk)} ({course.weights.gk}%) • CK: {formatComponentScore(course.ck, course.weights.ck)} ({course.weights.ck}%)
             </Text>
           </View>
         );
       })}
+
+      <Modal
+        visible={isConfirmSemesterDialogVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={closeConfirmSemesterDialog}
+      >
+        <View style={styles.deleteDialogBackdrop}>
+          <View style={styles.deleteDialog}>
+            <Text style={styles.deleteDialogTitle}>Xác nhận điểm học kỳ?</Text>
+            <Text style={styles.deleteDialogMessage}>
+              Bạn xác nhận đã hoàn thành “{sem.rawName} • {sem.year}”?
+            </Text>
+            <Text style={[styles.deleteDialogMessage, { marginTop: 8 }]}>
+              Sau khi xác nhận, học kỳ sẽ chuyển sang <Text style={{ fontWeight: '700' }}>Hoàn thành</Text> và
+              toàn bộ điểm của {detailCourses.length} môn sẽ bị khóa, không sửa hoặc xóa được nữa.
+            </Text>
+            <View style={styles.deleteDialogActions}>
+              <TouchableOpacity
+                style={styles.deleteCancelButton}
+                disabled={isConfirmingSemester}
+                onPress={closeConfirmSemesterDialog}
+              >
+                <Text style={styles.deleteCancelButtonText}>Hủy</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.confirmDialogButton, isConfirmingSemester && { opacity: 0.6 }]}
+                disabled={isConfirmingSemester}
+                onPress={() => confirmSemesterGrades(sem.id)}
+              >
+                <Text style={styles.confirmDialogButtonText}>
+                  {isConfirmingSemester ? 'Đang xác nhận...' : 'Xác nhận điểm'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
     );
   };
@@ -1170,9 +1306,9 @@ export default function App() {
               : styles.badgeGreenText;
 
           const gradeValues = [
-            { label: 'CC', value: subject.cc },
-            { label: 'GK', value: subject.gk },
-            { label: 'CK', value: subject.ck },
+            { label: 'CC', value: subject.cc, weight: subject.weights.cc },
+            { label: 'GK', value: subject.gk, weight: subject.weights.gk },
+            { label: 'CK', value: subject.ck, weight: subject.weights.ck },
             { label: 'Tổng', value: subject.total },
           ];
 
@@ -1194,14 +1330,19 @@ export default function App() {
               </View>
 
               <View style={[styles.gradeGrid, isFailed && styles.failedGradeGrid]}>
-                {gradeValues.map((grade) => (
-                  <View key={grade.label} style={styles.gradeCell}>
-                    <Text style={styles.gradeCellLabel}>{grade.label}</Text>
-                    <Text style={[styles.gradeCellValue, isFailed && styles.failedGradeValue, grade.value === 'Chưa nhập' && styles.pendingGradeValue]}>
-                      {grade.value}
-                    </Text>
-                  </View>
-                ))}
+                {gradeValues.map((grade) => {
+                  const displayValue = grade.weight === undefined
+                    ? grade.value
+                    : formatComponentScore(grade.value, grade.weight);
+                  return (
+                    <View key={grade.label} style={styles.gradeCell}>
+                      <Text style={styles.gradeCellLabel}>{grade.label}</Text>
+                      <Text style={[styles.gradeCellValue, isFailed && styles.failedGradeValue, (grade.value === 'Chưa nhập' || displayValue === '--') && styles.pendingGradeValue]}>
+                        {displayValue}
+                      </Text>
+                    </View>
+                  );
+                })}
               </View>
 
               {subject.canEdit && (
@@ -1536,7 +1677,8 @@ export default function App() {
           <View style={styles.deleteDialog}>
             <Text style={styles.deleteDialogTitle}>Xóa học phần?</Text>
             <Text style={styles.deleteDialogMessage}>
-              Bạn có chắc muốn xóa “{editingCourse.name}”? Các nhắc thi của học phần này cũng sẽ bị xóa.
+              Bạn có chắc muốn xóa “{editingCourse.name}”? Toàn bộ điểm chuyên cần, giữa kỳ, cuối kỳ,
+              điểm tổng kết và các nhắc thi của học phần này sẽ bị xóa vĩnh viễn, không thể hoàn tác.
             </Text>
             <View style={styles.deleteDialogActions}>
               <TouchableOpacity
@@ -1577,19 +1719,31 @@ export default function App() {
       );
     }
 
-    const targetTenMap = { 'A+': 9.0, A: 8.5, 'B+': 8.0, B: 7.0 };
-    const targetTen = targetTenMap[selectedTargetGrade] || 9.0;
-    const ccWeight = Number(activeCourse.weights.cc) || 0;
-    const gkWeight = Number(activeCourse.weights.gk) || 0;
-    const ckWeight = Number(activeCourse.weights.ck) || 0;
-    const requiredScoreNumber =
-      ckWeight > 0 && activeCourse.cc !== null && activeCourse.gk !== null
-        ? (targetTen * 100 - activeCourse.cc * ccWeight - activeCourse.gk * gkWeight) / ckWeight
-        : NaN;
-    const requiredScore = Number.isNaN(requiredScoreNumber) ? '--' : `${requiredScoreNumber.toFixed(2)} điểm`;
-    const isFeasible = !Number.isNaN(requiredScoreNumber) && requiredScoreNumber <= 10;
-    const targetPointMap = { 'A+': 4.0, A: 3.7, 'B+': 3.5, B: 3.0 };
-    const targetPoint = targetPointMap[selectedTargetGrade] || 4.0;
+    const targetOption =
+      TARGET_GRADE_OPTIONS.find((option) => option.key === selectedTargetGrade) || TARGET_GRADE_OPTIONS[0];
+    const targetTen = targetOption.ten;
+    const targetPoint = targetOption.point;
+    // Trọng số CK dùng để dự báo = 100% - (CC + GK). Nhờ vậy môn CK 100% vẫn dự báo được.
+    const forecast = getWhatIfForecast({
+      cc: activeCourse.cc,
+      gk: activeCourse.gk,
+      weights: activeCourse.weights,
+      targetTen,
+    });
+    const ckWeight = forecast.ckWeight;
+    const requiredScoreNumber = forecast.requiredScore;
+    const hasPrediction = requiredScoreNumber !== null;
+    const isFeasible = forecast.isFeasible;
+    const requiredScore = hasPrediction
+      ? `${Math.max(0, requiredScoreNumber).toFixed(2)} điểm`
+      : '--';
+    const feasibilityMessage = !hasPrediction
+      ? 'Không khả thi (Chưa đủ điểm CC/GK để dự báo)'
+      : !isFeasible
+        ? 'Không khả thi (Cần trên 10.0 điểm)'
+        : forecast.isAlreadyEnough
+          ? 'Khả thi (Đã đủ điểm để đạt mục tiêu)'
+          : 'Khả thi (Nằm trong khoảng 0.0 – 10.0)';
     const projectedGPA =
       overallStats.gradedCredits + activeCourse.credits > 0
         ? (overallStats.gpa * overallStats.gradedCredits + targetPoint * activeCourse.credits) /
@@ -1604,7 +1758,7 @@ export default function App() {
           <View style={styles.badgePurple}><Text style={styles.badgePurpleText}>Tính ngược CK</Text></View>
         </View>
 
-        <View style={[styles.card, isWhatIfDropdownOpen && styles.openDropdownCard]}>
+        <View style={[styles.card, (isWhatIfDropdownOpen || isTargetGradeDropdownOpen) && styles.openDropdownCard]}>
           <Text style={styles.label}>1. Chọn môn học chưa thi cuối kỳ</Text>
 
           {/* Ô chọn môn thiết kế gọn 1 hộp duy nhất có nút mũi tên bên phải */}
@@ -1620,6 +1774,8 @@ export default function App() {
               borderRadius: 12,
               marginBottom: 12,
             }}
+            accessibilityRole="button"
+            accessibilityLabel="Chọn môn học What-if"
             onPress={() => setIsWhatIfDropdownOpen(!isWhatIfDropdownOpen)}
           >
             <View style={{ flex: 1 }}>
@@ -1676,29 +1832,56 @@ export default function App() {
           )}
 
           <Text style={styles.label}>2. Chọn mức điểm tổng kết mong muốn</Text>
-          <View style={styles.rowGap}>
-            {[
-              { key: 'A+', label: 'A+ (9.0)' },
-              { key: 'A', label: 'A (8.5)' },
-              { key: 'B+', label: 'B+ (8.0)' },
-              { key: 'B', label: 'B (7.0)' },
-            ].map((grade) => (
-              <TouchableOpacity
-                key={grade.key}
-                style={selectedTargetGrade === grade.key ? [styles.chipActive, { backgroundColor: COLORS.purple }] : styles.chipGray}
-                onPress={() => setSelectedTargetGrade(grade.key)}
-              >
-                <Text style={selectedTargetGrade === grade.key ? styles.chipActiveText : styles.chipGrayText}>{grade.label}</Text>
-              </TouchableOpacity>
-            ))}
+          <View style={styles.targetGradeWrap}>
+            <TouchableOpacity
+              style={styles.targetGradeSelect}
+              accessibilityRole="button"
+              accessibilityLabel="Chọn mức điểm tổng kết mong muốn"
+              onPress={() => setIsTargetGradeDropdownOpen(!isTargetGradeDropdownOpen)}
+            >
+              <Text style={styles.targetGradeSelectText}>{targetOption.label}</Text>
+              <Ionicons
+                name={isTargetGradeDropdownOpen ? 'chevron-up' : 'chevron-down'}
+                size={15}
+                color={COLORS.purple}
+              />
+            </TouchableOpacity>
+            {isTargetGradeDropdownOpen && (
+              <View style={styles.targetGradeMenu}>
+                {TARGET_GRADE_OPTIONS.map((option, idx) => {
+                  const isSelected = option.key === selectedTargetGrade;
+                  return (
+                    <TouchableOpacity
+                      key={option.key}
+                      style={[
+                        styles.targetGradeOption,
+                        idx < TARGET_GRADE_OPTIONS.length - 1 && styles.targetGradeOptionDivider,
+                        isSelected && styles.targetGradeOptionSelected,
+                      ]}
+                      onPress={() => {
+                        setSelectedTargetGrade(option.key);
+                        setIsTargetGradeDropdownOpen(false);
+                      }}
+                    >
+                      <Text style={[
+                        styles.targetGradeOptionText,
+                        isSelected && styles.targetGradeOptionTextSelected,
+                      ]}>
+                        {isSelected ? <Ionicons name="checkmark" size={13} color={COLORS.purple} /> : null} {option.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
           </View>
 
           <View style={styles.resultBox}>
-            <Text style={{ fontSize: 12, color: COLORS.purple, fontWeight: '600' }}>Điểm thi Cuối kỳ ({activeCourse.weights.ck}%) tối thiểu cần đạt:</Text>
-            <Text style={{ fontSize: 28, fontWeight: '600', color: COLORS.purple, marginVertical: 4 }}>{requiredScore}</Text>
+            <Text style={{ fontSize: 12, color: COLORS.purple, fontWeight: '600' }}>Điểm thi Cuối kỳ ({ckWeight}%) tối thiểu cần đạt:</Text>
+            <Text style={{ fontSize: 28, fontWeight: '600', color: isFeasible ? COLORS.purple : COLORS.danger, marginVertical: 4 }}>{requiredScore}</Text>
             <Text style={{ fontSize: 11, fontWeight: '600', color: isFeasible ? COLORS.green : COLORS.danger }}>
               <Ionicons name={isFeasible ? 'checkmark-circle' : 'close-circle'} size={11} color={isFeasible ? COLORS.green : COLORS.danger} />{' '}
-              {isFeasible ? 'Khả thi (Nằm trong khoảng 0.0 – 10.0)' : 'Không khả thi (Cần trên 10.0 điểm)'}
+              {feasibilityMessage}
             </Text>
           </View>
 
@@ -1729,7 +1912,7 @@ export default function App() {
           <Ionicons name="notifications-outline" size={14} color={COLORS.green} /> Hẹn giờ nhắc lịch thi (Expo Notify)
         </Text>
 
-        {reminders.map((reminder) => (
+        {activeReminders.map((reminder) => (
           <View
             key={reminder.id}
             style={[styles.rowBetween, { backgroundColor: COLORS.bg, paddingHorizontal: 14, paddingVertical: 12, borderRadius: 10, marginBottom: 8, borderWidth: 1, borderColor: COLORS.border }]}
@@ -1739,15 +1922,17 @@ export default function App() {
                 <Ionicons name="calendar-outline" size={12} color={COLORS.textDark} /> {getReminderTypeLabel(reminder.type)}: {reminder.courseName}
               </Text>
               <Text style={{ fontSize: 10, color: COLORS.textMuted, marginTop: 2 }}>
-                {reminder.room} • Báo trước: {getReminderAdvanceLabel(reminder.advance)}
+                {reminder.room} • Báo thức: {reminder.alarmDate && reminder.alarmTime
+                  ? `${reminder.alarmDate} ${reminder.alarmTime}`
+                  : getReminderAdvanceLabel(reminder.advance)}
               </Text>
             </View>
             <Text style={{ fontSize: 11, fontWeight: '600', color: COLORS.green }}>{reminder.date} • {reminder.time}</Text>
           </View>
         ))}
-        {reminders.length === 0 && (
+        {activeReminders.length === 0 && (
           <Text style={[styles.itemSub, { textAlign: 'center', marginBottom: 12 }]}>
-            Chưa có lịch thi nào được lưu.
+            Chưa có lịch thi nào đang cần nhắc.
           </Text>
         )}
 
@@ -1766,29 +1951,38 @@ export default function App() {
   );
 
   const renderScreen11AddExamReminder = () => {
-    const selectedCourse =
-      currentSemesterCourses.find((item) => item.id === newReminder.courseId) || currentSemesterCourses[0];
+    const renderBackLink = () => (
+      <TouchableOpacity style={styles.backLinkRow} onPress={() => setCurrentScreen(10)}>
+        <Ionicons name="arrow-back" size={16} color={COLORS.green} />
+        <Text style={styles.backLinkGreen}>Quay lại</Text>
+      </TouchableOpacity>
+    );
 
-    if (!selectedCourse) {
+    if (reminderCourseOptions.length === 0) {
       return (
-        <ScrollView contentContainerStyle={styles.bodyPadding}>
+        <ScrollView contentContainerStyle={styles.reminderScreenContent}>
+          {renderBackLink()}
           <Text style={styles.screenTitle}>Thêm Lịch Nhắc Thi Mới</Text>
           <View style={styles.card}>
-            <Text style={styles.itemSub}>Chưa có học phần nào trong học kỳ hiện tại.</Text>
+            <Text style={styles.itemSub}>
+              Tất cả học phần trong học kỳ hiện tại đã có điểm cuối kỳ nên không cần nhắc thi nữa.
+            </Text>
           </View>
         </ScrollView>
       );
     }
 
+    const selectedOption =
+      reminderCourseOptions.find((option) => option.course.id === newReminder.courseId) ||
+      reminderCourseOptions[0];
+    const selectedCourse = selectedOption.course;
     const selectedCourseSemester =
       semesters.find((sem) => sem.id === selectedCourse.sem)?.name || selectedCourse.semester;
+    const remainingLabel = getReminderTypeSummary(selectedOption.allowedTypes);
 
     return (
       <ScrollView contentContainerStyle={styles.reminderScreenContent}>
-        <TouchableOpacity style={styles.backLinkRow} onPress={() => setCurrentScreen(10)}>
-          <Ionicons name="arrow-back" size={16} color={COLORS.green} />
-          <Text style={styles.backLinkGreen}>Quay lại</Text>
-        </TouchableOpacity>
+        {renderBackLink()}
 
         <View style={styles.rowBetween}>
           <Text style={styles.screenTitle}>Thêm Lịch Nhắc Thi Mới</Text>
@@ -1814,11 +2008,16 @@ export default function App() {
               borderRadius: 10,
               marginBottom: 12,
             }}
+            accessibilityRole="button"
+            accessibilityLabel="Chọn học phần nhắc thi"
             onPress={() => setIsReminderCourseOpen(!isReminderCourseOpen)}
           >
             <View style={{ flex: 1 }}>
               <Text style={styles.itemTitle}>{selectedCourse.name} ({selectedCourse.credits} TC)</Text>
               <Text style={{ fontSize: 11, color: COLORS.green, marginTop: 2 }}>{selectedCourseSemester}</Text>
+              <Text style={{ fontSize: 10.5, color: COLORS.textMuted, marginTop: 2 }}>
+                Còn thi: {remainingLabel}
+              </Text>
             </View>
             <Text style={{ fontSize: 14, fontWeight: '600', color: COLORS.green, marginLeft: 8 }}>
               {isReminderCourseOpen ? <Ionicons name="chevron-up" size={14} color={COLORS.green} /> : <Ionicons name="chevron-down" size={14} color={COLORS.green} />}
@@ -1841,8 +2040,10 @@ export default function App() {
                 overflow: 'hidden',
               }}
             >
-              {currentSemesterCourses.map((course, idx) => {
+              {reminderCourseOptions.map((option, idx) => {
+                const course = option.course;
                 const isSelected = newReminder.courseId === course.id;
+                const optionRemainingLabel = getReminderTypeSummary(option.allowedTypes);
                 return (
                   <TouchableOpacity
                     key={course.id}
@@ -1850,18 +2051,26 @@ export default function App() {
                       paddingHorizontal: 12,
                       paddingVertical: 10,
                       backgroundColor: isSelected ? COLORS.greenLight : COLORS.white,
-                      borderBottomWidth: idx < currentSemesterCourses.length - 1 ? 1 : 0,
+                      borderBottomWidth: idx < reminderCourseOptions.length - 1 ? 1 : 0,
                       borderBottomColor: COLORS.border,
                     }}
                     onPress={() => {
-                      setNewReminder((current) => ({ ...current, courseId: course.id }));
+                      setNewReminder((current) => ({
+                        ...current,
+                        courseId: course.id,
+                        type: option.allowedTypes.includes(current.type)
+                          ? current.type
+                          : option.allowedTypes[0],
+                      }));
                       setIsReminderCourseOpen(false);
                     }}
                   >
                     <Text style={{ fontSize: 13, fontWeight: '600', color: isSelected ? COLORS.green : COLORS.textDark }}>
                       {isSelected ? <Ionicons name="checkmark" size={13} color={COLORS.green} /> : null} {course.name} ({course.credits} TC)
                     </Text>
-                    <Text style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 2 }}>{course.semester}</Text>
+                    <Text style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 2 }}>
+                      {course.semester} • Còn thi: {optionRemainingLabel}
+                    </Text>
                   </TouchableOpacity>
                 );
               })}
@@ -1870,15 +2079,38 @@ export default function App() {
 
           <Text style={styles.label}>2. Loại lịch nhắc</Text>
           <View style={[styles.rowGap, { marginBottom: 12 }]}>
-            {REMINDER_TYPES.map((type) => (
-              <TouchableOpacity
-                key={type.key}
-                style={newReminder.type === type.key ? [styles.chipActive, { backgroundColor: COLORS.green }] : styles.chipGray}
-                onPress={() => setNewReminder((current) => ({ ...current, type: type.key }))}
-              >
-                <Text style={newReminder.type === type.key ? styles.chipActiveText : styles.chipGrayText}>{type.label}</Text>
-              </TouchableOpacity>
-            ))}
+            {REMINDER_TYPES.map((type) => {
+              const isAllowed = selectedOption.allowedTypes.includes(type.key);
+              const isActive = newReminder.type === type.key;
+              return (
+                <TouchableOpacity
+                  key={type.key}
+                  disabled={!isAllowed}
+                  accessibilityRole="button"
+                  accessibilityState={{ disabled: !isAllowed }}
+                  accessibilityLabel={`${type.label}${isAllowed ? '' : ' (không khả dụng)'}`}
+                  style={[
+                    isActive ? [styles.chipActive, { backgroundColor: COLORS.green }] : styles.chipGray,
+                    !isAllowed && styles.chipDisabled,
+                  ]}
+                  onPress={() => {
+                    if (!isAllowed) return;
+                    setNewReminder((current) => ({ ...current, type: type.key }));
+                  }}
+                >
+                  <Text style={isActive ? styles.chipActiveText : styles.chipGrayText}>
+                    {type.label}
+                  </Text>
+                  {!isAllowed && (
+                    <Text style={{ fontSize: 9, color: COLORS.textMuted, marginTop: 2 }}>
+                      {type.key === 'mid'
+                        ? (selectedOption.hasGkScore ? 'Đã có điểm GK' : 'Đã có nhắc thi')
+                        : 'Đã có điểm CK'}
+                    </Text>
+                  )}
+                </TouchableOpacity>
+              );
+            })}
           </View>
 
           <View style={styles.rowGap}>
@@ -1919,16 +2151,28 @@ export default function App() {
           />
 
           <Text style={styles.label}>7. Báo thức trước giờ thi (Expo Notify)</Text>
+          <Text style={{ fontSize: 11, color: COLORS.textMuted, marginBottom: 8 }}>
+            Tự chọn ngày và giờ bạn muốn được báo thức trước khi ca thi bắt đầu.
+          </Text>
           <View style={styles.rowGap}>
-            {REMINDER_ADVANCES.map((advance) => (
-              <TouchableOpacity
-                key={advance.key}
-                style={newReminder.advance === advance.key ? [styles.chipActive, { backgroundColor: COLORS.green }] : styles.chipGray}
-                onPress={() => setNewReminder((current) => ({ ...current, advance: advance.key }))}
-              >
-                <Text style={newReminder.advance === advance.key ? styles.chipActiveText : styles.chipGrayText}>{advance.label}</Text>
-              </TouchableOpacity>
-            ))}
+            <View style={{ flex: 1 }}>
+              <Text style={styles.label}>Ngày báo thức *</Text>
+              <TextInput
+                style={styles.input}
+                value={newReminder.alarmDate}
+                onChangeText={(value) => setNewReminder((current) => ({ ...current, alarmDate: value }))}
+                placeholder="DD/MM/YYYY"
+              />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.label}>Giờ báo thức *</Text>
+              <TextInput
+                style={styles.input}
+                value={newReminder.alarmTime}
+                onChangeText={(value) => setNewReminder((current) => ({ ...current, alarmTime: value }))}
+                placeholder="HH:MM"
+              />
+            </View>
           </View>
 
           {!!reminderFormError && (
@@ -2019,17 +2263,19 @@ export default function App() {
     }
     const detailCourse = subjects.find((item) => item.id === reminder.courseId);
     const targetTen = 8.5;
-    const ccValue = detailCourse ? parseGradeValue(detailCourse.cc) : null;
-    const gkValue = detailCourse ? parseGradeValue(detailCourse.gk) : null;
-    const ccWeight = detailCourse ? Number(detailCourse.weights.cc) || 0 : 0;
-    const gkWeight = detailCourse ? Number(detailCourse.weights.gk) || 0 : 0;
-    const ckWeight = detailCourse ? Number(detailCourse.weights.ck) || 0 : 0;
-    const requiredCkScore =
-      ccValue !== null && gkValue !== null && ckWeight > 0
-        ? (targetTen * 100 - ccValue * ccWeight - gkValue * gkWeight) / ckWeight
-        : null;
+    const forecast = getWhatIfForecast({
+      cc: detailCourse ? detailCourse.cc : null,
+      gk: detailCourse ? detailCourse.gk : null,
+      weights: detailCourse ? detailCourse.weights : {},
+      targetTen,
+    });
+    const ckWeight = forecast.ckWeight;
+    const requiredCkScore = forecast.requiredScore;
     const requiredCkText =
       requiredCkScore !== null && Number.isFinite(requiredCkScore) ? `${requiredCkScore.toFixed(2)} điểm` : '--';
+    const alarmLabel = reminder.alarmDate && reminder.alarmTime
+      ? `${reminder.alarmDate} • ${reminder.alarmTime}`
+      : getReminderAdvanceLabel(reminder.advance);
 
     return (
       <ScrollView contentContainerStyle={styles.reminderDetailScreen}>
@@ -2051,7 +2297,7 @@ export default function App() {
 
           <Text style={styles.examName}>{reminder.courseName} ({reminder.credits} TC)</Text>
           <Text style={styles.examMeta}>
-            {reminder.semesterLabel} • Trọng số CK: {detailCourse ? detailCourse.weights.ck : '--'}%
+            {reminder.semesterLabel} • Trọng số CK: {ckWeight}%
           </Text>
 
           <View style={styles.infoBox}>
@@ -2063,6 +2309,11 @@ export default function App() {
             <View style={styles.infoRow}>
               <Text style={styles.infoLabel}>Ngày &amp; Giờ thi:</Text>
               <Text style={styles.infoValueStrong}>{reminder.date} • {reminder.time} Sáng</Text>
+            </View>
+            <View style={styles.infoDivider} />
+            <View style={styles.infoRow}>
+              <Text style={styles.infoLabel}>Báo thức:</Text>
+              <Text style={styles.infoValueAmber}>{alarmLabel}</Text>
             </View>
             <View style={styles.infoDivider} />
             <View style={styles.infoRow}>
@@ -2122,6 +2373,8 @@ export default function App() {
           <TouchableOpacity
             style={styles.shadePullTab}
             activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="Mở thanh thông báo"
             onPress={() => setIsShadeOpen(true)}
           >
             <View style={styles.shadePullHandle} />
@@ -2193,11 +2446,11 @@ export default function App() {
       {/* THANH THÔNG BÁO MÔ PHỎNG OS: bấm thông báo -> Màn 13 chi tiết */}
       <NotificationShade
         visible={isShadeOpen}
-        reminder={reminders[0]}
+        reminder={activeReminders[0]}
         onClose={() => setIsShadeOpen(false)}
         onOpen={() => {
           setIsShadeOpen(false);
-          if (reminders[0]) openReminderDetail(reminders[0]);
+          if (activeReminders[0]) openReminderDetail(activeReminders[0]);
         }}
       />
       <Modal
@@ -2258,7 +2511,7 @@ export default function App() {
         visible={isProfileModalOpen}
         transparent
         animationType="fade"
-        onRequestClose={() => setIsProfileModalOpen(false)}
+        onRequestClose={closeProfileModal}
       >
         <View style={styles.deleteDialogBackdrop}>
           <TouchableOpacity
@@ -2266,88 +2519,147 @@ export default function App() {
             activeOpacity={1}
             accessibilityRole="button"
             accessibilityLabel="Đóng hồ sơ khi bấm ra ngoài"
-            onPress={() => setIsProfileModalOpen(false)}
+            onPress={closeProfileModal}
           />
           <View style={styles.deleteDialog}>
-            <View style={[styles.rowBetween, { marginBottom: 14 }]}>
-              <Text style={styles.deleteDialogTitle}>Hồ sơ cá nhân</Text>
-              <TouchableOpacity
-                accessibilityRole="button"
-                accessibilityLabel="Đóng hồ sơ cá nhân"
-                style={{ outlineStyle: 'none' }}
-                onPress={() => setIsProfileModalOpen(false)}
-              >
-                <Ionicons name="close" size={20} color={COLORS.textMuted} />
-              </TouchableOpacity>
-            </View>
+            {isProfileEditOpen ? (
+              <>
+                <View style={[styles.rowBetween, { marginBottom: 14 }]}>
+                  <Text style={styles.deleteDialogTitle}>Sửa hồ sơ</Text>
+                  <TouchableOpacity
+                    accessibilityRole="button"
+                    accessibilityLabel="Đóng hồ sơ cá nhân"
+                    style={{ outlineStyle: 'none' }}
+                    onPress={closeProfileModal}
+                  >
+                    <Ionicons name="close" size={20} color={COLORS.textMuted} />
+                  </TouchableOpacity>
+                </View>
 
-            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 14 }}>
-              <View
-                style={{
-                  width: 52,
-                  height: 52,
-                  borderRadius: 26,
-                  backgroundColor: COLORS.blue,
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  marginRight: 12,
-                }}
-              >
-                <Text style={{ color: COLORS.white, fontSize: 16, fontWeight: '700' }}>
-                  {(profile?.fullName || firebaseUser?.displayName || 'SV').split(/\s+/).slice(-2).map((part) => part[0]).join('').toUpperCase()}
-                </Text>
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.itemTitle}>{profile?.fullName || firebaseUser?.displayName || 'Sinh viên'}</Text>
-                <Text style={styles.itemSub}>{profile?.email || firebaseUser?.email || ''}</Text>
-              </View>
-            </View>
+                <Text style={styles.label}>GPA mục tiêu (Hệ 4)</Text>
+                <TextInput
+                  style={styles.input}
+                  value={profileTargetGpa}
+                  onChangeText={setProfileTargetGpa}
+                  placeholder="VD: 3.20"
+                  keyboardType="decimal-pad"
+                />
 
-            <View style={{ backgroundColor: COLORS.bg, borderRadius: 10, padding: 12, marginBottom: 12 }}>
-              <View style={styles.rowBetween}>
-                <Text style={{ fontSize: 12, color: COLORS.textMuted }}>GPA mục tiêu</Text>
-                <Text style={{ fontSize: 14, fontWeight: '700', color: COLORS.blue }}>
-                  {Number(profile?.targetGpa ?? 3.2).toFixed(2)}
-                </Text>
-              </View>
-            </View>
+                <Text style={styles.label}>Tổng tín chỉ chương trình</Text>
+                <TextInput
+                  style={styles.input}
+                  value={profileTotalCredits}
+                  onChangeText={setProfileTotalCredits}
+                  placeholder="VD: 130"
+                  keyboardType="number-pad"
+                />
 
-            <View
-              style={{
-                backgroundColor: COLORS.greenLight,
-                paddingVertical: 10,
-                paddingHorizontal: 12,
-                borderRadius: 10,
-                alignItems: 'center',
-                marginBottom: 4,
-              }}
-            >
-              <Text style={{ fontSize: 12, fontWeight: '600', color: COLORS.green }}>
-                <Ionicons name="cloud-done-outline" size={12} color={COLORS.green} /> Dữ liệu tài khoản được tải từ Firestore
-              </Text>
-            </View>
+                {!!profileEditError && (
+                  <Text style={{ fontSize: 12, fontWeight: '600', color: COLORS.danger, marginBottom: 8 }}>
+                    {profileEditError}
+                  </Text>
+                )}
 
-            <TouchableOpacity
-              style={{
-                marginTop: 14,
-                paddingVertical: 12,
-                borderRadius: 10,
-                borderWidth: 1,
-                borderColor: COLORS.danger,
-                backgroundColor: COLORS.dangerLight,
-                alignItems: 'center',
-              }}
-              accessibilityRole="button"
-              accessibilityLabel="Đăng xuất"
-              onPress={() => {
-                setIsProfileModalOpen(false);
-                handleLogout();
-              }}
-            >
-              <Text style={{ color: COLORS.danger, fontWeight: '600', fontSize: 13 }}>
-                <Ionicons name="log-out-outline" size={14} color={COLORS.danger} /> Đăng xuất
-              </Text>
-            </TouchableOpacity>
+                <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
+                  <TouchableOpacity
+                    style={[styles.deleteCancelButton, { flex: 1, marginTop: 0 }]}
+                    accessibilityRole="button"
+                    accessibilityLabel="Quay lại hồ sơ cá nhân"
+                    onPress={closeProfileEdit}
+                    disabled={isSavingProfile}
+                  >
+                    <Text style={styles.deleteCancelButtonText}>Quay lại</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.registerConfirmButton, { flex: 1, marginTop: 0 }, isSavingProfile && { opacity: 0.6 }]}
+                    accessibilityRole="button"
+                    accessibilityLabel="Lưu hồ sơ"
+                    onPress={handleSaveProfile}
+                    disabled={isSavingProfile}
+                  >
+                    <Text style={styles.registerConfirmButtonText}>
+                      {isSavingProfile ? 'Đang lưu...' : 'Lưu'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </>
+            ) : (
+              <>
+                <View style={[styles.rowBetween, { marginBottom: 14 }]}>
+                  <Text style={styles.deleteDialogTitle}>Hồ sơ cá nhân</Text>
+                  <TouchableOpacity
+                    accessibilityRole="button"
+                    accessibilityLabel="Đóng hồ sơ cá nhân"
+                    style={{ outlineStyle: 'none' }}
+                    onPress={closeProfileModal}
+                  >
+                    <Ionicons name="close" size={20} color={COLORS.textMuted} />
+                  </TouchableOpacity>
+                </View>
+
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 16 }}>
+                  <View
+                    style={{
+                      width: 52,
+                      height: 52,
+                      borderRadius: 26,
+                      backgroundColor: COLORS.blue,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      marginRight: 12,
+                    }}
+                  >
+                    <Text style={{ color: COLORS.white, fontSize: 16, fontWeight: '700' }}>
+                      {(profile?.fullName || firebaseUser?.displayName || 'SV').split(/\s+/).slice(-2).map((part) => part[0]).join('').toUpperCase()}
+                    </Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.itemTitle}>{profile?.fullName || firebaseUser?.displayName || 'Sinh viên'}</Text>
+                    <Text style={styles.itemSub}>{profile?.email || firebaseUser?.email || ''}</Text>
+                  </View>
+                </View>
+
+                <TouchableOpacity
+                  style={{
+                    paddingVertical: 12,
+                    borderRadius: 10,
+                    borderWidth: 1,
+                    borderColor: COLORS.blue,
+                    backgroundColor: COLORS.blueLight,
+                    alignItems: 'center',
+                    marginBottom: 10,
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Sửa hồ sơ"
+                  onPress={openProfileEdit}
+                >
+                  <Text style={{ color: COLORS.blue, fontWeight: '600', fontSize: 13 }}>
+                    <Ionicons name="create-outline" size={14} color={COLORS.blue} /> Sửa hồ sơ
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={{
+                    paddingVertical: 12,
+                    borderRadius: 10,
+                    borderWidth: 1,
+                    borderColor: COLORS.danger,
+                    backgroundColor: COLORS.dangerLight,
+                    alignItems: 'center',
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Đăng xuất"
+                  onPress={() => {
+                    closeProfileModal();
+                    handleLogout();
+                  }}
+                >
+                  <Text style={{ color: COLORS.danger, fontWeight: '600', fontSize: 13 }}>
+                    <Ionicons name="log-out-outline" size={14} color={COLORS.danger} /> Đăng xuất
+                  </Text>
+                </TouchableOpacity>
+              </>
+            )}
           </View>
         </View>
       </Modal>

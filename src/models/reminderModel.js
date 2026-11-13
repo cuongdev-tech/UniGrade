@@ -14,7 +14,8 @@ export const FIELDS = [
 ];
 
 // Field phụ: mốc báo trước, phục vụ chức năng thông báo (không có trong ERD).
-export const EXTRA_FIELDS = ['advance'];
+// alarm_date / alarm_time là thời điểm báo thức người dùng tự chọn (thay cho advance).
+export const EXTRA_FIELDS = ['advance', 'alarm_date', 'alarm_time'];
 
 // Tên cũ đọc được để tương thích ngược với dữ liệu đã có.
 export const ALIASES = {
@@ -24,6 +25,9 @@ export const ALIASES = {
   exam_room: ['exam_room', 'room'],
   note: ['note', 'description'],
   advance: ['advance', 'remind_before'],
+  alarm_date: ['alarm_date', 'remind_date', 'notify_date'],
+  alarm_time: ['alarm_time', 'remind_time', 'notify_time'],
+  is_acknowledged: ['is_acknowledged', 'acknowledged', 'isAcknowledged'],
 };
 
 export const formatDateForUi = (value) => {
@@ -52,6 +56,9 @@ export const fromFirestore = (snapshot, course) => {
     room: firstValue(data, ALIASES.exam_room, ''),
     note: firstValue(data, ALIASES.note, ''),
     advance: firstValue(data, ALIASES.advance, '1d'),
+    alarmDate: formatDateForUi(firstValue(data, ALIASES.alarm_date, '')),
+    alarmTime: firstValue(data, ALIASES.alarm_time, ''),
+    isAcknowledged: firstValue(data, ALIASES.is_acknowledged, false) === true,
   };
 };
 
@@ -63,6 +70,8 @@ export const toFirestore = (reminderId, reminder) => ({
   exam_time: reminder.time,
   exam_room: reminder.room,
   note: reminder.note || null,
-  advance: reminder.advance,
-  is_acknowledged: false,
+  advance: reminder.advance || null,
+  alarm_date: reminder.alarmDate ? formatDateForDatabase(reminder.alarmDate) : null,
+  alarm_time: reminder.alarmTime || null,
+  is_acknowledged: reminder.isAcknowledged === true,
 });

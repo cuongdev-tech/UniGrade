@@ -43,3 +43,9 @@ export const toFirestore = (uid, profile) => ({
   target_gpa: profile.targetGpa,
   created_at: new Date().toISOString(),
 });
+
+// Chỉ cập nhật các field người dùng được sửa ở màn "Sửa hồ sơ".
+export const toProfileUpdate = (profile) => ({
+  total_program_credits: profile.totalProgramCredits,
+  target_gpa: profile.targetGpa,
+});

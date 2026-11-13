@@ -22,8 +22,10 @@ import {
   ensureSemesterRecord,
   loadUserWorkspace,
   acknowledgeReminderRecord,
+  confirmSemesterRecord,
   updateCourseRecord,
   updateCourseRecords,
+  updateUserProfileRecord,
 } from '../repositories/firebaseRepository';
 import { getFirebaseServices } from '../firebase';
 import {
@@ -45,11 +47,17 @@ import {
   buildSemesterId,
   parseSemesterLabel,
 } from '../services/gradeImportService';
+import { getReminderAvailability } from '../services/reminderService';
 import {
   EMAIL_ALREADY_EXISTS_MESSAGE,
   getFirebaseErrorMessage,
   getSemesterOptionLabel,
 } from '../constants/config';
+import {
+  getAcademicYearStart,
+  getSemesterDisplayStatus,
+  canConfirmSemester,
+} from '../models/semesterModel';
 
 export function useUniGradeViewModel() {
   const [currentScreen, setCurrentScreen] = useState(1);
@@ -114,8 +122,9 @@ export function useUniGradeViewModel() {
 
   // State cho Dropdown chọn môn ở Màn hình 9 (Dự báo Điểm What-if)
   const [isWhatIfDropdownOpen, setIsWhatIfDropdownOpen] = useState(false);
+  const [isTargetGradeDropdownOpen, setIsTargetGradeDropdownOpen] = useState(false);
   const [selectedWhatIfIndex, setSelectedWhatIfIndex] = useState(0);
-  const [selectedTargetGrade, setSelectedTargetGrade] = useState('A'); // A (8.5) | B+ (8.0) | B (7.0)
+  const [selectedTargetGrade, setSelectedTargetGrade] = useState('A+'); // A+ (9.0) | A (8.5) | B+ (8.0) | B (7.0)
   const [isAddCourseSemesterOpen, setIsAddCourseSemesterOpen] = useState(false);
   const [selectedAddCourseSemester, setSelectedAddCourseSemester] = useState('');
   const [addCourseName, setAddCourseName] = useState('');
@@ -136,6 +145,8 @@ export function useUniGradeViewModel() {
   const [editCourseCredits, setEditCourseCredits] = useState('3');
   const [editCourseGrades, setEditCourseGrades] = useState({ cc: '9.0', gk: '8.5', ck: '9.0' });
   const [isDeleteCourseDialogVisible, setIsDeleteCourseDialogVisible] = useState(false);
+  const [isConfirmSemesterDialogVisible, setIsConfirmSemesterDialogVisible] = useState(false);
+  const [isConfirmingSemester, setIsConfirmingSemester] = useState(false);
 
   // State nhắc thi & hồ sơ (Màn 10, 11, 13, 14)
   const [reminders, setReminders] = useState([]);
@@ -148,11 +159,19 @@ export function useUniGradeViewModel() {
     time: '',
     room: '',
     note: '',
-    advance: '1d',
+    alarmDate: '',
+    alarmTime: '',
   });
   const [reminderFormError, setReminderFormError] = useState('');
   const [profileNotice, setProfileNotice] = useState('');
   const profileNoticeTimer = useRef(null);
+
+  // State riêng cho màn "Sửa hồ sơ" trong modal avatar (chỉ GPA mục tiêu + tổng tín chỉ).
+  const [isProfileEditOpen, setIsProfileEditOpen] = useState(false);
+  const [profileTargetGpa, setProfileTargetGpa] = useState('');
+  const [profileTotalCredits, setProfileTotalCredits] = useState('');
+  const [profileEditError, setProfileEditError] = useState('');
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
 
   useEffect(() => {
     let unsubscribe;
@@ -328,11 +347,73 @@ export function useUniGradeViewModel() {
 
   const acknowledgeReminder = async () => {
     if (!selectedReminderId) return;
+    const acknowledgedId = selectedReminderId;
+    // Gỡ khỏi trang Nhắc thi ngay khi người dùng bấm xác nhận,
+    // không chờ có điểm CK và không phụ thuộc trạng thái học kỳ.
+    const remainingReminders = reminders.filter(
+      (reminder) => reminder.id !== acknowledgedId && !reminder.isAcknowledged
+    );
+    setReminders((current) =>
+      current.map((reminder) =>
+        reminder.id === acknowledgedId ? { ...reminder, isAcknowledged: true } : reminder
+      )
+    );
+    setSelectedReminderId(remainingReminders[0]?.id || '');
+    setCurrentScreen(10);
     try {
-      await acknowledgeReminderRecord(selectedReminderId);
-      setCurrentScreen(10);
+      await acknowledgeReminderRecord(acknowledgedId);
     } catch (error) {
       setOperationError(getFirebaseErrorMessage(error));
+    }
+  };
+
+  // ----- Sửa hồ sơ: chỉ GPA mục tiêu và tổng tín chỉ chương trình -----
+  const openProfileEdit = () => {
+    setProfileTargetGpa(String(profile?.targetGpa ?? 3.2));
+    setProfileTotalCredits(String(profile?.totalProgramCredits ?? 130));
+    setProfileEditError('');
+    setIsProfileEditOpen(true);
+  };
+
+  const closeProfileEdit = () => {
+    setProfileEditError('');
+    setIsProfileEditOpen(false);
+  };
+
+  const saveProfileSettings = async () => {
+    const targetGpa = Number(profileTargetGpa);
+    const totalProgramCredits = Number(profileTotalCredits);
+
+    if (!Number.isFinite(targetGpa) || targetGpa < 0 || targetGpa > 4) {
+      setProfileEditError('GPA mục tiêu phải nằm trong khoảng 0.00 – 4.00.');
+      return false;
+    }
+    if (!Number.isInteger(totalProgramCredits) || totalProgramCredits < 1 || totalProgramCredits > 300) {
+      setProfileEditError('Tổng tín chỉ phải là số nguyên từ 1 đến 300.');
+      return false;
+    }
+    if (!firebaseUser?.uid) {
+      setProfileEditError('Không xác định được tài khoản đang đăng nhập.');
+      return false;
+    }
+
+    setIsSavingProfile(true);
+    try {
+      await updateUserProfileRecord(firebaseUser.uid, { targetGpa, totalProgramCredits });
+      setProfile((current) => ({
+        ...(current || {}),
+        targetGpa,
+        totalProgramCredits,
+      }));
+      showProfileNotice('Đã lưu hồ sơ: GPA mục tiêu và tổng tín chỉ đã được cập nhật.');
+      setIsProfileEditOpen(false);
+      setProfileEditError('');
+      return true;
+    } catch (error) {
+      setProfileEditError(getFirebaseErrorMessage(error));
+      return false;
+    } finally {
+      setIsSavingProfile(false);
     }
   };
 
@@ -355,10 +436,19 @@ export function useUniGradeViewModel() {
   const formatSemesterAverage = (stats) =>
     hasFinalSemesterGpa(stats) ? stats.avg10.toFixed(2) : isSemesterGpaProvisional(stats) ? `${stats.avg10.toFixed(2)}*` : '--';
 
-  const semesterStats = semesters.map((sem) => ({
-    ...sem,
-    stats: calcSemesterStats(subjects.filter((item) => item.sem === sem.id)),
-  }));
+  const semesterStats = semesters.map((sem) => {
+    const semesterCourses = subjects.filter((item) => item.sem === sem.id);
+    const isConfirmed = sem.status === 'Hoàn thành';
+    return {
+      ...sem,
+      // Trạng thái hiển thị: Đang học / Chưa xác nhận / Hoàn thành.
+      status: getSemesterDisplayStatus(sem.status, sem.year, semesters),
+      isConfirmed,
+      // Nút "✓ Xác nhận điểm" chỉ hiện khi kỳ chưa chốt và 100% môn đã có điểm tổng kết.
+      canConfirm: canConfirmSemester(sem.status, semesterCourses),
+      stats: calcSemesterStats(semesterCourses),
+    };
+  });
 
   const overallStats = calcSemesterStats(subjects);
   const remainingCredits = Math.max(0, TOTAL_PROGRAM_CREDITS - overallStats.earnedCredits);
@@ -367,7 +457,13 @@ export function useUniGradeViewModel() {
   const overallGpaText = hasOverallGpa ? overallStats.gpa.toFixed(2) : '--';
   const overallAverageText = hasOverallGpa ? overallStats.avg10.toFixed(2) : '--';
   const emptySemesterStats = calcSemesterStats([]);
-  const currentSemesterStats = semesterStats.find((sem) => sem.status === 'Đang học') || semesterStats[0] || {
+  // Kỳ hiện tại: trong các kỳ còn "Đang học", chọn năm học lớn nhất.
+  const currentSemesterStats = semesterStats
+    .filter((sem) => sem.status === 'Đang học')
+    .sort(
+      (a, b) =>
+        (getAcademicYearStart(b.year) || 0) - (getAcademicYearStart(a.year) || 0)
+    )[0] || semesterStats[0] || {
     id: '',
     name: 'Chưa có học kỳ',
     rawName: 'Chưa có học kỳ',
@@ -432,6 +528,10 @@ export function useUniGradeViewModel() {
 
   const openEditCourse = (sub) => {
     dismissCourseActionNotice();
+    if (!sub || sub.canEdit === false) {
+      setOperationError('Học kỳ đã xác nhận điểm nên không thể sửa học phần này.');
+      return;
+    }
     setSelectedCourseId(sub.id);
     setEditCourseName(sub.name);
     setEditCourseCredits(String(sub.credits));
@@ -445,6 +545,10 @@ export function useUniGradeViewModel() {
   };
 
   const saveEditCourse = async () => {
+    if (!editingCourse || editingCourse.canEdit === false) {
+      setOperationError('Học kỳ đã xác nhận điểm nên không thể sửa điểm.');
+      return;
+    }
     if (editWeightTotal !== 100 || Object.values(editCourseGrades).some(isGradeValueInvalid)) return;
 
     const savedCourseName = editCourseName.trim() || editingCourse.name;
@@ -528,25 +632,25 @@ export function useUniGradeViewModel() {
       name: `${rawName} (${normalizedYear})`,
       rawName,
       year: normalizedYear,
+      // Học kỳ mới luôn ở learning cho tới khi người dùng bấm "✓ Xác nhận điểm".
+      // Kỳ năm cũ sẽ hiển thị là "Chưa xác nhận" nhờ getSemesterDisplayStatus.
       status: 'Đang học',
     };
-    const previousSemesterIds = semesters
-      .filter((semester) => semester.status === 'Đang học')
-      .map((semester) => semester.id);
+    // Không tự chuyển các kỳ trước sang completed: chỉ chốt khi có xác nhận thủ công.
     let semesterId;
     try {
-      semesterId = await createSemesterRecord(firebaseUser.uid, newSemester, previousSemesterIds);
+      semesterId = await createSemesterRecord(
+        firebaseUser.uid,
+        newSemester,
+        [],
+        semesters.map((semester) => semester.id)
+      );
     } catch (error) {
       setOperationError(getFirebaseErrorMessage(error));
       return;
     }
     newSemester.id = semesterId;
-    setSemesters((current) => [
-      ...current.map((semester) =>
-        semester.status === 'Đang học' ? { ...semester, status: 'Hoàn thành' } : semester
-      ),
-      newSemester,
-    ]);
+    setSemesters((current) => [...current, newSemester]);
     setNewSemesterName('');
     setNewSemesterYear('');
     setSemesterYearQuery('');
@@ -561,6 +665,11 @@ export function useUniGradeViewModel() {
   };
 
   const deleteEditingCourse = async () => {
+    if (!editingCourse || editingCourse.canEdit === false) {
+      setIsDeleteCourseDialogVisible(false);
+      setOperationError('Học kỳ đã xác nhận điểm nên không thể xóa học phần.');
+      return;
+    }
     const courseId = selectedCourseId;
     const deletedCourseName = editingCourse.name;
     const remainingCourses = subjects.filter((item) => item.id !== courseId);
@@ -592,6 +701,51 @@ export function useUniGradeViewModel() {
     setCurrentScreen(6);
   };
 
+  // ----- Chốt điểm học kỳ: learning -> completed -----
+  const openConfirmSemesterDialog = (semesterId = selectedSemesterId) => {
+    const sem = semesterStats.find((item) => item.id === semesterId);
+    if (!sem || sem.isConfirmed || !sem.canConfirm) return;
+    setIsConfirmSemesterDialogVisible(true);
+  };
+
+  const closeConfirmSemesterDialog = () => {
+    if (isConfirmingSemester) return;
+    setIsConfirmSemesterDialogVisible(false);
+  };
+
+  const confirmSemesterGrades = async (semesterId = selectedSemesterId) => {
+    const sem = semesterStats.find((item) => item.id === semesterId);
+    if (!sem || sem.isConfirmed || !sem.canConfirm) {
+      setIsConfirmSemesterDialogVisible(false);
+      return;
+    }
+    setIsConfirmingSemester(true);
+    try {
+      await confirmSemesterRecord(sem.id);
+    } catch (error) {
+      setOperationError(getFirebaseErrorMessage(error));
+      setIsConfirmingSemester(false);
+      return;
+    }
+    // Khóa toàn bộ môn của kỳ ngay trên state, không cần tải lại app.
+    setSemesters((current) =>
+      current.map((item) =>
+        item.id === sem.id ? { ...item, status: 'Hoàn thành' } : item
+      )
+    );
+    setSubjects((current) =>
+      current.map((item) =>
+        item.sem === sem.id ? { ...item, canEdit: false } : item
+      )
+    );
+    setIsConfirmingSemester(false);
+    setIsConfirmSemesterDialogVisible(false);
+    showCourseActionNotice({
+      type: 'success',
+      message: `Đã xác nhận điểm ${sem.rawName} • ${sem.year}. Điểm của học kỳ này đã bị khóa.`,
+    });
+  };
+
   const createCourse = async () => {
     const name = addCourseName.trim();
     const credits = Number(addCourseCredits);
@@ -609,6 +763,10 @@ export function useUniGradeViewModel() {
     }
     if (!semester) {
       setAddCourseError('Vui lòng chọn học kỳ hợp lệ.');
+      return;
+    }
+    if (semester.status === 'Hoàn thành') {
+      setAddCourseError('Học kỳ đã xác nhận điểm nên không thể thêm học phần.');
       return;
     }
     if (addWeightTotal !== 100) {
@@ -632,7 +790,7 @@ export function useUniGradeViewModel() {
     };
 
     try {
-      newCourse.id = await createCourseRecord(newCourse);
+      newCourse.id = await createCourseRecord(newCourse, subjects.map((item) => item.id));
     } catch (error) {
       setOperationError(getFirebaseErrorMessage(error));
       return;
@@ -657,15 +815,78 @@ export function useUniGradeViewModel() {
   const currentSemesterCourses = subjects.filter((item) => item.sem === currentSemesterStats.id);
   const pendingCurrentCourses = currentSemesterCourses.filter((item) => parseGradeValue(item.ck) === null);
   const reminderCourses = pendingCurrentCourses.length > 0 ? pendingCurrentCourses : currentSemesterCourses;
-  const whatIfCourses = reminderCourses.map((item) => ({
-    id: item.id,
-    name: `${item.name} (${item.credits} TC)`,
-    credits: item.credits,
-    cc: parseGradeValue(item.cc),
-    gk: parseGradeValue(item.gk),
-    weights: item.weights,
-    detail: `Đã có: CC ${item.cc} (${item.weights.cc}%) • GK ${item.gk} (${item.weights.gk}%)`,
-  }));
+  const whatIfCourses = reminderCourses.map((item) => {
+    const ccWeight = Number(item.weights.cc) || 0;
+    const gkWeight = Number(item.weights.gk) || 0;
+    const ckWeight = Number(item.weights.ck) || 0;
+    const ccValue = parseGradeValue(item.cc);
+    const gkValue = parseGradeValue(item.gk);
+    const detailParts = [];
+    if (ccWeight > 0) {
+      detailParts.push(`CC ${ccValue === null ? 'chưa nhập' : item.cc} (${ccWeight}%)`);
+    }
+    if (gkWeight > 0) {
+      detailParts.push(`GK ${gkValue === null ? 'chưa nhập' : item.gk} (${gkWeight}%)`);
+    }
+    if (ckWeight > 0) detailParts.push(`CK ${ckWeight}%`);
+    return {
+      id: item.id,
+      name: `${item.name} (${item.credits} TC)`,
+      credits: item.credits,
+      cc: ccValue,
+      gk: gkValue,
+      weights: item.weights,
+      // Trọng số CK để dự báo = phần trăm còn lại sau CC + GK.
+      remainingCkWeight: Math.max(0, 100 - ccWeight - gkWeight),
+      detail: detailParts.length > 0 ? detailParts.join(' • ') : 'Chưa có trọng số thành phần',
+    };
+  });
+
+  // ----- Lựa chọn học phần cho form nhắc thi (Màn 11) -----
+  // Chỉ gợi ý môn còn thiếu điểm thi:
+  // - Chưa có điểm CK -> được chọn (nhắc CK, và nhắc GK nếu chưa có điểm GK).
+  // - Đã có điểm GK -> khóa lựa chọn Thi Giữa kỳ, chỉ còn Thi Cuối kỳ.
+  // - Đã có điểm CK -> coi như thi xong, không hiện trong danh sách chọn nữa.
+  // - Đã tạo lịch nhắc Giữa kỳ (dù đã xác nhận hay chưa) -> khóa lựa chọn Giữa kỳ.
+  // - Đã tạo lịch nhắc Cuối kỳ (dù đã xác nhận hay chưa) -> môn biến mất khỏi danh sách.
+  // Mỗi môn chỉ có tối đa 1 lịch nhắc cho mỗi loại thi, nên phải gom toàn bộ
+  // reminders (kể cả chưa xác nhận) chứ không chỉ reminders đã xác nhận.
+  const reminderTypesByCourse = reminders.reduce((acc, reminder) => {
+    const types = acc[reminder.courseId] || [];
+    if (!types.includes(reminder.type)) types.push(reminder.type);
+    acc[reminder.courseId] = types;
+    return acc;
+  }, {});
+
+  const reminderCourseOptions = currentSemesterCourses
+    .map((course) => ({
+      course,
+      ...getReminderAvailability(course, reminderTypesByCourse[course.id] || []),
+    }))
+    .filter((option) => option.isEligible);
+
+  // Giữ lựa chọn hợp lệ: môn đã có điểm CK bị loại khỏi danh sách, loại nhắc thi
+  // đã có điểm cũng không còn chọn được -> tự chuyển sang lựa chọn còn lại.
+  const reminderCourseOptionKey = reminderCourseOptions
+    .map((option) => `${option.course.id}:${option.allowedTypes.join('|')}`)
+    .join(',');
+
+  useEffect(() => {
+    if (reminderCourseOptions.length === 0) return;
+    const currentOption =
+      reminderCourseOptions.find((option) => option.course.id === newReminder.courseId) ||
+      reminderCourseOptions[0];
+    const nextType = currentOption.allowedTypes.includes(newReminder.type)
+      ? newReminder.type
+      : currentOption.allowedTypes[0];
+    if (newReminder.courseId !== currentOption.course.id || newReminder.type !== nextType) {
+      setNewReminder((current) => ({
+        ...current,
+        courseId: currentOption.course.id,
+        type: nextType,
+      }));
+    }
+  }, [reminderCourseOptionKey, newReminder.courseId, newReminder.type]);
 
   // ----- Helper cho luồng nhắc thi & hồ sơ (Màn 10, 11, 13, 14) -----
   const openReminderDetail = (reminder) => {
@@ -673,14 +894,67 @@ export function useUniGradeViewModel() {
     setCurrentScreen(13);
   };
 
+  // Đọc ngày DD/MM/YYYY + giờ HH:MM thành Date để so sánh báo thức với giờ thi.
+  const parseDateTimeInput = (dateValue, timeValue) => {
+    const dateMatch = String(dateValue || '').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    const timeMatch = String(timeValue || '').trim().match(/^(\d{1,2}):(\d{2})$/);
+    if (!dateMatch || !timeMatch) return null;
+    const day = Number(dateMatch[1]);
+    const month = Number(dateMatch[2]);
+    const year = Number(dateMatch[3]);
+    const hour = Number(timeMatch[1]);
+    const minute = Number(timeMatch[2]);
+    if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59) return null;
+    const parsed = new Date(year, month - 1, day, hour, minute, 0, 0);
+    if (
+      parsed.getFullYear() !== year ||
+      parsed.getMonth() !== month - 1 ||
+      parsed.getDate() !== day
+    ) {
+      return null;
+    }
+    return parsed;
+  };
+
   const saveNewReminder = async () => {
-    const course = currentSemesterCourses.find((item) => item.id === newReminder.courseId);
-    if (!course) {
-      setReminderFormError('Vui lòng chọn học phần cần nhắc thi.');
+    const selectedOption = reminderCourseOptions.find(
+      (option) => option.course.id === newReminder.courseId
+    );
+    if (!selectedOption) {
+      setReminderFormError(
+        'Học phần này đã có lịch nhắc thi cuối kỳ hoặc đã có điểm cuối kỳ. Vui lòng chọn học phần khác.'
+      );
       return;
     }
+    if (!selectedOption.allowedTypes.includes(newReminder.type)) {
+      setReminderFormError(
+        newReminder.type === 'mid'
+          ? 'Học phần này đã có điểm giữa kỳ hoặc đã có lịch nhắc thi giữa kỳ. Vui lòng chọn loại Thi Cuối kỳ.'
+          : 'Học phần này đã có lịch nhắc thi cuối kỳ hoặc đã có điểm cuối kỳ. Vui lòng chọn học phần khác.'
+      );
+      return;
+    }
+    const course = selectedOption.course;
     if (!newReminder.date.trim() || !newReminder.time.trim() || !newReminder.room.trim()) {
       setReminderFormError('Vui lòng nhập đầy đủ ngày thi, giờ thi và phòng thi.');
+      return;
+    }
+    const examDateTime = parseDateTimeInput(newReminder.date, newReminder.time);
+    if (!examDateTime) {
+      setReminderFormError('Ngày thi cần đúng dạng DD/MM/YYYY và giờ thi dạng HH:MM.');
+      return;
+    }
+    if (!newReminder.alarmDate.trim() || !newReminder.alarmTime.trim()) {
+      setReminderFormError('Vui lòng nhập ngày và giờ báo thức trước giờ thi.');
+      return;
+    }
+    const alarmDateTime = parseDateTimeInput(newReminder.alarmDate, newReminder.alarmTime);
+    if (!alarmDateTime) {
+      setReminderFormError('Ngày báo thức cần đúng dạng DD/MM/YYYY và giờ báo thức dạng HH:MM.');
+      return;
+    }
+    if (alarmDateTime.getTime() >= examDateTime.getTime()) {
+      setReminderFormError('Thời điểm báo thức phải trước giờ thi.');
       return;
     }
 
@@ -695,11 +969,13 @@ export function useUniGradeViewModel() {
       time: newReminder.time.trim(),
       room: newReminder.room.trim(),
       note: newReminder.note.trim(),
-      advance: newReminder.advance,
+      alarmDate: newReminder.alarmDate.trim(),
+      alarmTime: newReminder.alarmTime.trim(),
+      isAcknowledged: false,
     };
 
     try {
-      reminder.id = await createReminderRecord(reminder);
+      reminder.id = await createReminderRecord(reminder, reminders.map((item) => item.id));
     } catch (error) {
       setOperationError(getFirebaseErrorMessage(error));
       return;
@@ -715,7 +991,8 @@ export function useUniGradeViewModel() {
       time: '',
       room: '',
       note: '',
-      advance: '1d',
+      alarmDate: '',
+      alarmTime: '',
     });
     setCurrentScreen(10);
   };
@@ -825,26 +1102,37 @@ export function useUniGradeViewModel() {
         return;
       }
 
-      // Tìm học kỳ đã có theo khóa "hocky<term><start><end>"; chưa có thì tạo mới ở trạng thái Hoàn thành.
-      // Nhờ vậy đang học 2026-2027 vẫn nhập được điểm năm 1 (2024-2025) / năm 2 (2025-2026).
+      // Học kỳ đã xác nhận thì khóa hoàn toàn: không sửa điểm, không thêm môn mới.
+      const lockedSemesterIds = new Set(
+        semesters.filter((semester) => semester.status === 'Hoàn thành').map((semester) => semester.id)
+      );
+
+      // Tìm học kỳ đã có theo khóa "hocky<term><start><end>"; chưa có thì tạo mới ở trạng thái learning.
+      // Nhờ vậy đang học 2026-2027 vẫn nhập được điểm năm 1 (2024-2025) / năm 2 (2025-2026),
+      // và các kỳ đó vẫn chờ người dùng bấm "✓ Xác nhận điểm" mới chuyển completed.
       const semesterByCanonical = new Map();
       semesters.forEach((semester) => {
         const label = parseSemesterLabel(`${semester.rawName} ${semester.year}`);
         if (label) semesterByCanonical.set(label.canonical, semester);
       });
 
+      let lockedSkippedCount = 0;
       for (const row of newCourseRows) {
         const info = row.semesterInfo;
         const semesterId = buildSemesterId(info);
         // Ưu tiên học kỳ đã có trong app (theo tên/năm hoặc theo mã cố định).
         let semester = semesterByCanonical.get(info.canonical)
           || semesters.find((item) => item.id === semesterId);
+        if (semester && lockedSemesterIds.has(semester.id)) {
+          lockedSkippedCount += 1;
+          continue;
+        }
         if (!semester) {
           const newSemester = {
             name: `Học kỳ ${info.term} (${info.startYear} - ${info.endYear})`,
             rawName: `Học kỳ ${info.term}`,
             year: `${info.startYear} - ${info.endYear}`,
-            status: 'Hoàn thành',
+            status: 'Đang học',
           };
           newSemester.id = await ensureSemesterRecord(firebaseUser.uid, semesterId, newSemester);
           semester = newSemester;
@@ -853,7 +1141,10 @@ export function useUniGradeViewModel() {
         }
 
         const newCourse = buildCourseFromImportRow(row, semester);
-        newCourse.id = await createCourseRecord(newCourse);
+        newCourse.id = await createCourseRecord(newCourse, [
+          ...subjects.map((item) => item.id),
+          ...createdSubjects.map((item) => item.id),
+        ]);
         createdSubjects.push(newCourse);
       }
 
@@ -862,22 +1153,36 @@ export function useUniGradeViewModel() {
       [importResult.total10BySubject, importResult.total4BySubject, importResult.letterBySubject].forEach((map) => {
         if (map) map.forEach((_value, key) => importedGradeIds.add(key));
       });
-      const creditsOnlyCount = importedSubjectIds.size - importedGradeIds.size;
+      const originalById = new Map(subjects.map((subject) => [subject.id, subject]));
+      const editableImportedIds = new Set(
+        [...importedSubjectIds].filter((id) => {
+          const subject = originalById.get(id);
+          return subject && !lockedSemesterIds.has(subject.sem);
+        })
+      );
+      const lockedImportedCount = importedSubjectIds.size - editableImportedIds.size;
+      const creditsOnlyCount = [...editableImportedIds].filter((id) => !importedGradeIds.has(id)).length;
 
       const updatedSubjects = applyImportedGrades(subjects, importResult);
-      if (importedSubjectIds.size > 0) {
-        await updateCourseRecords(
-          updatedSubjects.filter((subject) => importedSubjectIds.has(subject.id))
-        );
+      // Giữ nguyên môn thuộc kỳ đã xác nhận (không ghi đè điểm đã khóa).
+      const nextSubjects = updatedSubjects.map((subject) =>
+        lockedSemesterIds.has(subject.sem) ? originalById.get(subject.id) || subject : subject
+      );
+      const editableUpdates = nextSubjects.filter(
+        (subject) => importedSubjectIds.has(subject.id) && !lockedSemesterIds.has(subject.sem)
+      );
+      if (editableUpdates.length > 0) {
+        await updateCourseRecords(editableUpdates);
       }
-      setSubjects([...updatedSubjects, ...createdSubjects]);
+      setSubjects([...nextSubjects, ...createdSubjects]);
       if (createdSemesters.length > 0) {
         setSemesters((current) => [...current, ...createdSemesters]);
       }
 
       const summaryParts = [];
       if (importedGradeIds.size > 0) {
-        summaryParts.push(`Đã nhập điểm cho ${importedGradeIds.size} môn`);
+        const editableGradeCount = [...importedGradeIds].filter((id) => editableImportedIds.has(id)).length;
+        if (editableGradeCount > 0) summaryParts.push(`Đã nhập điểm cho ${editableGradeCount} môn`);
       }
       if (creditsOnlyCount > 0) {
         summaryParts.push(`Đã cập nhật tín chỉ cho ${creditsOnlyCount} môn`);
@@ -888,6 +1193,12 @@ export function useUniGradeViewModel() {
             ? `Đã tạo ${createdSubjects.length} học phần và ${createdSemesters.length} học kỳ mới`
             : `Đã tạo ${createdSubjects.length} học phần mới`
         );
+      }
+      if (lockedImportedCount > 0) {
+        summaryParts.push(`Bỏ qua ${lockedImportedCount} môn thuộc học kỳ đã xác nhận`);
+      }
+      if (lockedSkippedCount > 0) {
+        summaryParts.push(`Bỏ qua ${lockedSkippedCount} môn mới thuộc học kỳ đã xác nhận`);
       }
       const importSummary = summaryParts.length > 0
         ? `${summaryParts.join(', ')}.`
@@ -987,6 +1298,8 @@ export function useUniGradeViewModel() {
     setSelectedSemesterId,
     isWhatIfDropdownOpen,
     setIsWhatIfDropdownOpen,
+    isTargetGradeDropdownOpen,
+    setIsTargetGradeDropdownOpen,
     selectedWhatIfIndex,
     setSelectedWhatIfIndex,
     selectedTargetGrade,
@@ -1020,6 +1333,11 @@ export function useUniGradeViewModel() {
     setEditCourseGrades,
     isDeleteCourseDialogVisible,
     setIsDeleteCourseDialogVisible,
+    isConfirmSemesterDialogVisible,
+    isConfirmingSemester,
+    openConfirmSemesterDialog,
+    closeConfirmSemesterDialog,
+    confirmSemesterGrades,
     reminders,
     setReminders,
     selectedReminderId,
@@ -1032,6 +1350,18 @@ export function useUniGradeViewModel() {
     setReminderFormError,
     profileNotice,
     setProfileNotice,
+    isProfileEditOpen,
+    setIsProfileEditOpen,
+    profileTargetGpa,
+    setProfileTargetGpa,
+    profileTotalCredits,
+    setProfileTotalCredits,
+    profileEditError,
+    setProfileEditError,
+    isSavingProfile,
+    openProfileEdit,
+    closeProfileEdit,
+    saveProfileSettings,
     handleLogin,
     handleRegister,
     confirmRegister,
@@ -1066,6 +1396,7 @@ export function useUniGradeViewModel() {
     currentSemesterCourses,
     pendingCurrentCourses,
     reminderCourses,
+    reminderCourseOptions,
     whatIfCourses,
     openReminderDetail,
     saveNewReminder,

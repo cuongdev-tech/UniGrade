@@ -17,6 +17,12 @@ export const isGradeValueInvalid = (value) => {
   return !Number.isFinite(grade) || grade < 0 || grade > 10;
 };
 
+// Cột trọng số 0% không cần nhập điểm -> hiển thị "--" thay vì "Chưa nhập".
+export const formatComponentScore = (value, weight) => {
+  if (Number(weight) === 0) return '--';
+  return value;
+};
+
 // Bảng quy đổi điểm chữ ↔ hệ 4. Dùng chung cho model, nhập Excel và xuất CSV
 // để tránh mỗi nơi định nghĩa một kiểu.
 export const LETTER_POINTS = {

@@ -11,6 +11,7 @@ import {
 } from 'firebase/firestore';
 import { getFirebaseServices } from '../firebase';
 import { userModel, semesterModel, courseModel, reminderModel } from '../models';
+import { buildCourseId, buildSemesterDocumentId, buildReminderId } from '../services/courseIdService';
 
 export async function loadUserWorkspace(uid) {
   const { db } = getFirebaseServices();
@@ -46,11 +47,12 @@ export async function loadUserWorkspace(uid) {
   return { profile, semesters, courses, reminders };
 }
 
-export async function createSemesterRecord(uid, semester, previousSemesterIds) {
+export async function createSemesterRecord(uid, semester, previousSemesterIds, existingIds = []) {
   const { db } = getFirebaseServices();
   const batch = writeBatch(db);
-  const reference = doc(collection(db, 'semesters'));
-  const semesterId = reference.id;
+  // Mã dễ nhận diện: sem_hk1_2627 thay vì ID ngẫu nhiên dài.
+  const semesterId = buildSemesterDocumentId(semester.rawName, semester.year, existingIds);
+  const reference = doc(db, 'semesters', semesterId);
 
   previousSemesterIds.forEach((id) => {
     batch.update(doc(db, 'semesters', id), semesterModel.toStatusUpdate());
@@ -73,16 +75,22 @@ export async function ensureSemesterRecord(uid, semesterId, semester) {
   }
   await setDoc(
     reference,
-    semesterModel.toFirestore(semesterId, uid, { ...semester, status: 'Hoàn thành' })
+    semesterModel.toFirestore(semesterId, uid, semester)
   );
   return semesterId;
 }
 
-export async function createCourseRecord(course) {
+// Chốt điểm học kỳ: learning -> completed, sau đó mọi thao tác sửa/xóa điểm bị khóa.
+export async function confirmSemesterRecord(semesterId) {
   const { db } = getFirebaseServices();
-  const reference = doc(collection(db, 'courses'));
-  const id = reference.id;
-  await setDoc(reference, courseModel.toFirestore({ ...course, id }));
+  await updateDoc(doc(db, 'semesters', semesterId), { status: 'completed' });
+}
+
+export async function createCourseRecord(course, existingIds = []) {
+  const { db } = getFirebaseServices();
+  // Mã dễ nhận diện: crs_htm_2627, crs_AC_2627... thay vì ID ngẫu nhiên dài.
+  const id = buildCourseId(course.name, course.sem, existingIds);
+  await setDoc(doc(db, 'courses', id), courseModel.toFirestore({ ...course, id }));
   return id;
 }
 
@@ -112,11 +120,11 @@ export async function deleteCourseAndReminders(courseId, reminders) {
   await batch.commit();
 }
 
-export async function createReminderRecord(reminder) {
+export async function createReminderRecord(reminder, existingIds = []) {
   const { db } = getFirebaseServices();
-  const reference = doc(collection(db, 'exam_reminders'));
-  const reminderId = reference.id;
-  await setDoc(reference, reminderModel.toFirestore(reminderId, reminder));
+  // Mã dễ nhận diện: rem_att_2627_ck thay vì ID ngẫu nhiên dài.
+  const reminderId = buildReminderId(reminder.courseId, reminder.type, existingIds);
+  await setDoc(doc(db, 'exam_reminders', reminderId), reminderModel.toFirestore(reminderId, reminder));
   return reminderId;
 }
 
@@ -128,4 +136,10 @@ export async function acknowledgeReminderRecord(reminderId) {
 export async function createUserProfile(uid, profile) {
   const { db } = getFirebaseServices();
   await setDoc(doc(db, 'users', uid), userModel.toFirestore(uid, profile));
+}
+
+// Cập nhật GPA mục tiêu / tổng tín chỉ từ màn "Sửa hồ sơ".
+export async function updateUserProfileRecord(uid, profile) {
+  const { db } = getFirebaseServices();
+  await updateDoc(doc(db, 'users', uid), userModel.toProfileUpdate(profile));
 }

@@ -156,6 +156,19 @@ export const styles = StyleSheet.create({
     borderRadius: 9, backgroundColor: COLORS.danger,
   },
   deleteConfirmButtonText: { color: COLORS.white, fontSize: 13, fontWeight: '700' },
+  confirmGradesButton: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    backgroundColor: COLORS.green, paddingHorizontal: 10, paddingVertical: 7, borderRadius: 9,
+  },
+  confirmGradesButtonText: { color: COLORS.white, fontSize: 11, fontWeight: '700' },
+  lockedSemesterNotice: {
+    fontSize: 11, color: COLORS.textMuted, marginBottom: 8, lineHeight: 16,
+  },
+  confirmDialogButton: {
+    minWidth: 130, alignItems: 'center', paddingHorizontal: 14, paddingVertical: 10,
+    borderRadius: 9, backgroundColor: COLORS.green,
+  },
+  confirmDialogButtonText: { color: COLORS.white, fontSize: 13, fontWeight: '700' },
   registerEmailPreview: {
     marginTop: 12, padding: 12, borderRadius: 10, backgroundColor: COLORS.greenLight,
   },
@@ -198,6 +211,13 @@ export const styles = StyleSheet.create({
   backLinkGreen: { fontSize: 14, fontWeight: '600', color: COLORS.green },
   sectionTitle: { fontSize: 15, fontWeight: '600', color: COLORS.textDark, marginVertical: 8 },
   heroBlueCard: { backgroundColor: COLORS.blue, padding: 16, borderRadius: 16, marginBottom: 14 },
+  gpaWarningCard: {
+    flexDirection: 'row', alignItems: 'flex-start', gap: 10,
+    backgroundColor: COLORS.dangerLight, borderColor: '#FECACA', borderWidth: 1,
+    borderRadius: 12, padding: 12, marginBottom: 14,
+  },
+  gpaWarningTitle: { color: COLORS.danger, fontSize: 13, fontWeight: '700', marginBottom: 3 },
+  gpaWarningText: { color: '#991B1B', fontSize: 11.5, lineHeight: 17 },
   heroSub: { color: '#DBEAFE', fontSize: 11, fontWeight: '500' },
   heroBig: { color: COLORS.white, fontSize: 28, fontWeight: '600', marginVertical: 2 },
   card: {
@@ -263,6 +283,7 @@ export const styles = StyleSheet.create({
   chipActiveText: { color: COLORS.white, fontSize: 11, fontWeight: '600' },
   chipGray: { flex: 1, paddingVertical: 8, borderRadius: 10, backgroundColor: '#F1F5F9', alignItems: 'center' },
   chipGrayText: { color: COLORS.textMuted, fontSize: 11, fontWeight: '600' },
+  chipDisabled: { opacity: 0.4 },
   semesterFilter: { backgroundColor: COLORS.purpleLight, padding: 10, borderRadius: 12, marginBottom: 10, zIndex: 2, elevation: 2, overflow: 'visible' },
   semesterFilterCollapsed: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 8 },
   semesterFilterLabel: { fontSize: 12, fontWeight: '700', color: COLORS.purple },
@@ -299,6 +320,25 @@ export const styles = StyleSheet.create({
     backgroundColor: COLORS.purpleLight, borderColor: COLORS.purple, borderWidth: 1.5,
     borderRadius: 14, padding: 14, alignItems: 'center', marginTop: 12,
   },
+  targetGradeWrap: { position: 'relative', zIndex: 25, elevation: 25, marginBottom: 2 },
+  targetGradeSelect: {
+    minHeight: 44, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: COLORS.purpleLight, borderColor: COLORS.purple, borderWidth: 1,
+    borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10,
+  },
+  targetGradeSelectText: { color: COLORS.purple, fontSize: 14, fontWeight: '700' },
+  targetGradeMenu: {
+    position: 'absolute', top: '100%', left: 0, right: 0, marginTop: 5, zIndex: 40, elevation: 40,
+    backgroundColor: COLORS.white, borderColor: COLORS.border, borderWidth: 1,
+    borderRadius: 10, overflow: 'hidden',
+    shadowColor: '#0F172A', shadowOffset: { width: 0, height: 5 },
+    shadowOpacity: 0.14, shadowRadius: 10,
+  },
+  targetGradeOption: { paddingHorizontal: 14, paddingVertical: 11 },
+  targetGradeOptionDivider: { borderBottomWidth: 1, borderBottomColor: COLORS.border },
+  targetGradeOptionSelected: { backgroundColor: COLORS.purpleLight },
+  targetGradeOptionText: { color: COLORS.textDark, fontSize: 13, fontWeight: '600' },
+  targetGradeOptionTextSelected: { color: COLORS.purple, fontWeight: '700' },
   reminderDetailScreen: { paddingHorizontal: 16, paddingTop: 16, paddingBottom: 26, backgroundColor: '#F8FAFC' },
   detailTitle: { color: '#0F172A', fontSize: 19, fontWeight: '700', marginBottom: 12 },
   detailCard: {

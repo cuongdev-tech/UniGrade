@@ -1,8 +1,8 @@
 // ViewModel: toàn bộ state, hiệu ứng và xử lý nghiệp vụ của UniGrade.
 // Được tách nguyên văn từ App.js (bước 4 MVVM) — không đổi logic hay giao diện.
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { PanResponder, Platform } from 'react-native';
-import * as Excel from 'xlsx';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system';
 import {
@@ -22,23 +22,30 @@ import {
   ensureSemesterRecord,
   loadUserWorkspace,
   acknowledgeReminderRecord,
+  updateReminderAlarmRecord,
   confirmSemesterRecord,
-  updateCourseRecord,
   updateCourseRecords,
   updateUserProfileRecord,
+  upsertForecastRecord,
 } from '../repositories/firebaseRepository';
 import { getFirebaseServices } from '../firebase';
 import {
   parseGradeValue,
+  parseDecimalValue,
+  parseCourseCredits,
+  parseTargetGpa,
+  roundGradeTotal,
+  getCourseWeightTotal,
   isGradeValueInvalid,
   getGradeLetter,
-  parseLetterGrade,
   calcCourseTotal,
+  clearZeroWeightGrades,
   getRankByGPA,
   calcSemesterStats,
   hasFinalSemesterGpa,
 } from '../services/gradeService';
 import {
+  readGradeImportRows,
   parseGradeSheet,
   applyImportedGrades,
   getImportedSubjectIds,
@@ -46,18 +53,40 @@ import {
   buildCourseFromImportRow,
   buildSemesterId,
   parseSemesterLabel,
+  IMPORT_REQUIRED_COLUMNS_MESSAGE,
 } from '../services/gradeImportService';
-import { getReminderAvailability } from '../services/reminderService';
+import {
+  getReminderAvailability,
+  getRemindersToDelete,
+  getNewReminderError,
+  getReminderAlarmError,
+  getReminderAlarmStatus,
+  parseDateTimeInput,
+  getSnoozeAlarm,
+  findAlarmToAutoShow,
+  isReminderBeforeToday,
+} from '../services/reminderService';
+import {
+  getAddCoursePreview,
+  getCourseImportBlocker,
+  getCpaCourses,
+} from '../services/retakeService';
+import { getRemainingFinalWeight, getWhatIfForecast } from '../services/forecastService';
 import {
   EMAIL_ALREADY_EXISTS_MESSAGE,
+  MIN_PASSWORD_LENGTH,
   getFirebaseErrorMessage,
   getSemesterOptionLabel,
+  getTargetGradeOption,
+  isValidEmail,
 } from '../constants/config';
 import {
-  getAcademicYearStart,
+  compareSemesters,
   getSemesterDisplayStatus,
   canConfirmSemester,
 } from '../models/semesterModel';
+
+const REMEMBERED_LOGIN_EMAIL_KEY = 'unigrade.remembered-login-email';
 
 export function useUniGradeViewModel() {
   const [currentScreen, setCurrentScreen] = useState(1);
@@ -79,8 +108,35 @@ export function useUniGradeViewModel() {
   const [registerCredits, setRegisterCredits] = useState('');
   const [registerSemesters, setRegisterSemesters] = useState('');
   const [registerTargetGpa, setRegisterTargetGpa] = useState('3.2');
+  const registerProgramCredits = parseDecimalValue(registerCredits);
+  const registerProgramSemesters = parseDecimalValue(registerSemesters);
+  const registerGpa = parseTargetGpa(registerTargetGpa);
+  const isRegisterProgramValid =
+    Number.isSafeInteger(registerProgramCredits) && registerProgramCredits >= 1 &&
+    Number.isSafeInteger(registerProgramSemesters) && registerProgramSemesters >= 1 &&
+    registerGpa !== null;
   const [isRegisterConfirmationVisible, setIsRegisterConfirmationVisible] = useState(false);
   const [resetEmail, setResetEmail] = useState('');
+
+  const persistRememberedEmail = async (email, shouldRemember) => {
+    try {
+      if (shouldRemember && email.trim()) {
+        await AsyncStorage.setItem(REMEMBERED_LOGIN_EMAIL_KEY, email.trim());
+      } else if (!shouldRemember) {
+        await AsyncStorage.removeItem(REMEMBERED_LOGIN_EMAIL_KEY);
+      }
+    } catch {
+      setAuthNotice('Không thể lưu email ghi nhớ trên thiết bị.');
+    }
+  };
+
+  const updateRememberPassword = (nextValue) => {
+    const shouldRemember = typeof nextValue === 'function'
+      ? nextValue(rememberPassword)
+      : Boolean(nextValue);
+    setRememberPassword(shouldRemember);
+    void persistRememberedEmail(loginEmail, shouldRemember);
+  };
 
   useEffect(() => {
     if (authError !== EMAIL_ALREADY_EXISTS_MESSAGE) return undefined;
@@ -88,19 +144,40 @@ export function useUniGradeViewModel() {
     return () => clearTimeout(timeoutId);
   }, [authError]);
 
-  // Thanh thông báo mô phỏng hệ điều hành: vuốt từ mép trên xuống để mở
-  const [isShadeOpen, setIsShadeOpen] = useState(false);
-  const shadePanResponder = useRef(
-    PanResponder.create({
-      onMoveShouldSetPanResponder: (_, gesture) =>
-        gesture.y0 <= 60 && gesture.dy > 20 && Math.abs(gesture.dy) > Math.abs(gesture.dx),
-      onMoveShouldSetPanResponderCapture: (_, gesture) =>
-        gesture.y0 <= 60 && gesture.dy > 20 && Math.abs(gesture.dy) > Math.abs(gesture.dx),
-      onPanResponderRelease: (_, gesture) => {
-        if (gesture.dy > 36) setIsShadeOpen(true);
-      },
-    })
-  ).current;
+  useEffect(() => {
+    let active = true;
+    AsyncStorage.getItem(REMEMBERED_LOGIN_EMAIL_KEY)
+      .then((email) => {
+        if (!active || !email) return;
+        setLoginEmail(email);
+        setRememberPassword(true);
+      })
+      .catch(() => {
+        if (active) setAuthNotice('Không thể đọc email đã ghi nhớ trên thiết bị.');
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // Khay chỉ mở khi đã chọn được một báo thức đến giờ.
+  const [shadeReminderId, setShadeReminderId] = useState('');
+  const [hasDueAlarm, setHasDueAlarm] = useState(false);
+  const [shadeReminderError, setShadeReminderError] = useState('');
+  const shadeReminderIdRef = useRef('');
+  const autoShownAlarmKeys = useRef(new Set());
+  const isShadeOpen = Boolean(shadeReminderId);
+  const closeShade = useCallback(() => {
+    shadeReminderIdRef.current = '';
+    setShadeReminderId('');
+    setShadeReminderError('');
+  }, []);
+  const showAlarm = useCallback((reminder) => {
+    autoShownAlarmKeys.current.add(`${reminder.id}|${reminder.alarmDate}|${reminder.alarmTime}`);
+    shadeReminderIdRef.current = reminder.id;
+    setShadeReminderId(reminder.id);
+    setShadeReminderError('');
+  }, []);
 
   // State bộ lọc tĩnh trên Màn 3 & Màn 6
   const [semesterYearQuery, setSemesterYearQuery] = useState('');
@@ -119,6 +196,7 @@ export function useUniGradeViewModel() {
   const [isSemesterFilterExpanded, setIsSemesterFilterExpanded] = useState(false);
   const [semesterFilterButtonWidth, setSemesterFilterButtonWidth] = useState(0);
   const [selectedSemesterId, setSelectedSemesterId] = useState('hk1'); // Học kỳ đang xem ở Màn 5
+  const orderedSemesters = [...semesters].sort(compareSemesters);
 
   // State cho Dropdown chọn môn ở Màn hình 9 (Dự báo Điểm What-if)
   const [isWhatIfDropdownOpen, setIsWhatIfDropdownOpen] = useState(false);
@@ -130,13 +208,13 @@ export function useUniGradeViewModel() {
   const [addCourseName, setAddCourseName] = useState('');
   const [addCourseCredits, setAddCourseCredits] = useState('');
   const [addCourseError, setAddCourseError] = useState('');
-  const courseSemesterOptions = semesters.map(getSemesterOptionLabel);
+  const courseSemesterOptions = orderedSemesters.map(getSemesterOptionLabel);
 
   // State trọng số thành phần (%) cho Màn 7 (Thêm) và Màn 8 (Sửa)
   const [addCourseWeights, setAddCourseWeights] = useState({ cc: '10', gk: '30', ck: '60' });
   const [editCourseWeights, setEditCourseWeights] = useState({ cc: '10', gk: '30', ck: '60' });
-  const addWeightTotal = (Number(addCourseWeights.cc) || 0) + (Number(addCourseWeights.gk) || 0) + (Number(addCourseWeights.ck) || 0);
-  const editWeightTotal = (Number(editCourseWeights.cc) || 0) + (Number(editCourseWeights.gk) || 0) + (Number(editCourseWeights.ck) || 0);
+  const addWeightTotal = getCourseWeightTotal(addCourseWeights);
+  const editWeightTotal = getCourseWeightTotal(editCourseWeights);
 
   // State danh sách môn + môn đang sửa ở Màn 8 (UI state, chưa có backend)
   const [subjects, setSubjects] = useState([]);
@@ -148,13 +226,24 @@ export function useUniGradeViewModel() {
   const [isConfirmSemesterDialogVisible, setIsConfirmSemesterDialogVisible] = useState(false);
   const [isConfirmingSemester, setIsConfirmingSemester] = useState(false);
 
+  // Nhận biết học lại ngay khi gõ tên ở Màn 7: môn đã trượt thì cho thêm lại,
+  // môn đã đạt hoặc đang học thì chặn (đồng bộ với COURSES.is_passed của ERD).
+  const selectedAddCourseSemesterRecord = semesters.find(
+    (item) => getSemesterOptionLabel(item) === selectedAddCourseSemester
+  );
+  const addCoursePreview = getAddCoursePreview({
+    courses: subjects,
+    name: addCourseName,
+    semesterId: selectedAddCourseSemesterRecord?.id || '',
+  });
+
   // State nhắc thi & hồ sơ (Màn 10, 11, 13, 14)
   const [reminders, setReminders] = useState([]);
   const [selectedReminderId, setSelectedReminderId] = useState('');
   const [isReminderCourseOpen, setIsReminderCourseOpen] = useState(false);
   const [newReminder, setNewReminder] = useState({
     courseId: '',
-    type: 'final',
+    type: '',
     date: '',
     time: '',
     room: '',
@@ -163,8 +252,67 @@ export function useUniGradeViewModel() {
     alarmTime: '',
   });
   const [reminderFormError, setReminderFormError] = useState('');
+  const [isSavingReminder, setIsSavingReminder] = useState(false);
+  const reminderWritePending = useRef(false);
   const [profileNotice, setProfileNotice] = useState('');
   const profileNoticeTimer = useRef(null);
+
+  const gradeRelevantReminders = useMemo(() => {
+    const coursesById = new Map(subjects.map((course) => [course.id, course]));
+    return reminders.filter((reminder) => {
+      const course = coursesById.get(reminder.courseId);
+      return !course || getReminderAvailability(course).pendingTypes.includes(reminder.type);
+    });
+  }, [subjects, reminders]);
+  const activeReminders = gradeRelevantReminders.filter(
+    (reminder) => !reminder.isAcknowledged && !isReminderBeforeToday(reminder)
+  );
+
+  const canShowReminderShade = Boolean(firebaseUser && currentScreen > 2 && currentScreen !== 12);
+  const openReminderShade = useCallback(() => {
+    if (!canShowReminderShade || shadeReminderIdRef.current) return;
+    const due = findAlarmToAutoShow(gradeRelevantReminders);
+    if (due) showAlarm(due);
+  }, [canShowReminderShade, gradeRelevantReminders, showAlarm]);
+
+  const shadePanResponder = useMemo(() => {
+    const canHandleSwipe = (_, gesture) =>
+      canShowReminderShade && !shadeReminderIdRef.current
+      && gesture.y0 <= 60 && gesture.dy > 20 && Math.abs(gesture.dy) > Math.abs(gesture.dx)
+      && Boolean(findAlarmToAutoShow(gradeRelevantReminders));
+    return PanResponder.create({
+      onMoveShouldSetPanResponder: canHandleSwipe,
+      onMoveShouldSetPanResponderCapture: canHandleSwipe,
+      onPanResponderRelease: (_, gesture) => {
+        if (gesture.dy > 36) openReminderShade();
+      },
+    });
+  }, [canShowReminderShade, gradeRelevantReminders, openReminderShade]);
+
+  // Mỗi mốc báo thức chỉ tự bật một lần trong khoảng thời gian còn hiệu lực.
+  useEffect(() => {
+    if (!canShowReminderShade) {
+      setHasDueAlarm(false);
+      closeShade();
+      return undefined;
+    }
+
+    const tick = () => {
+      const now = Date.now();
+      setHasDueAlarm(Boolean(findAlarmToAutoShow(gradeRelevantReminders, now)));
+      if (shadeReminderIdRef.current) {
+        const opened = gradeRelevantReminders.find((item) => item.id === shadeReminderIdRef.current && !item.isAcknowledged);
+        if (opened && getReminderAlarmStatus(opened, now) === 'due') return;
+        closeShade();
+      }
+      const due = findAlarmToAutoShow(gradeRelevantReminders, now, autoShownAlarmKeys.current);
+      if (due) showAlarm(due);
+    };
+
+    tick();
+    const timer = setInterval(tick, 15000);
+    return () => clearInterval(timer);
+  }, [canShowReminderShade, closeShade, gradeRelevantReminders, showAlarm]);
 
   // State riêng cho màn "Sửa hồ sơ" trong modal avatar (chỉ GPA mục tiêu + tổng tín chỉ).
   const [isProfileEditOpen, setIsProfileEditOpen] = useState(false);
@@ -186,6 +334,7 @@ export function useUniGradeViewModel() {
           setSemesters([]);
           setSubjects([]);
           setReminders([]);
+          setShadeReminderError('');
           setCurrentScreen(1);
           setIsWorkspaceLoading(false);
           return;
@@ -195,7 +344,7 @@ export function useUniGradeViewModel() {
         setIsWorkspaceLoading(true);
         setOperationError('');
         try {
-          const workspace = await loadUserWorkspace(user.uid);
+          const workspace = await loadUserWorkspace(user.uid, user);
           setProfile(workspace.profile);
           setSemesters(workspace.semesters);
           setSubjects(workspace.courses);
@@ -205,7 +354,9 @@ export function useUniGradeViewModel() {
             ...current,
             courseId: workspace.courses[0]?.id || '',
           }));
-          setSelectedSemesterId(workspace.semesters[0]?.id || '');
+          setSelectedSemesterId(
+            [...workspace.semesters].sort(compareSemesters).slice(-1)[0]?.id || ''
+          );
           setCurrentScreen(3);
         } catch (error) {
           setOperationError(getFirebaseErrorMessage(error));
@@ -226,7 +377,13 @@ export function useUniGradeViewModel() {
     if (courseSemesterOptions.length === 0) {
       setSelectedAddCourseSemester('');
     } else if (!courseSemesterOptions.includes(selectedAddCourseSemester)) {
-      setSelectedAddCourseSemester(courseSemesterOptions[0]);
+      const latestOpenSemester = [...orderedSemesters].reverse().find(
+        (semester) => semester.status !== 'Hoàn thành'
+      );
+      const latestSemester = orderedSemesters[orderedSemesters.length - 1];
+      setSelectedAddCourseSemester(
+        getSemesterOptionLabel(latestOpenSemester || latestSemester)
+      );
     }
   }, [semesters]);
 
@@ -234,14 +391,24 @@ export function useUniGradeViewModel() {
     setAuthError('');
     setAuthNotice('');
     setOperationError('');
-    if (!loginEmail.trim() || !loginPassword) {
+    const email = loginEmail.trim();
+    if (!email || !loginPassword) {
       setAuthError('Vui lòng nhập email và mật khẩu.');
+      return;
+    }
+    if (!isValidEmail(email)) {
+      setAuthError('Email không đúng định dạng.');
+      return;
+    }
+    if (loginPassword.length < MIN_PASSWORD_LENGTH) {
+      setAuthError(`Mật khẩu phải có ít nhất ${MIN_PASSWORD_LENGTH} ký tự.`);
       return;
     }
     setIsAuthBusy(true);
     try {
       const { auth } = getFirebaseServices();
-      await signInWithEmailAndPassword(auth, loginEmail.trim(), loginPassword);
+      await signInWithEmailAndPassword(auth, email, loginPassword);
+      await persistRememberedEmail(email, rememberPassword);
     } catch (error) {
       setAuthError(getFirebaseErrorMessage(error));
     } finally {
@@ -254,21 +421,24 @@ export function useUniGradeViewModel() {
     setAuthNotice('');
     const fullName = registerName.trim();
     const email = registerEmail.trim();
-    const totalProgramCredits = Number(registerCredits);
-    const totalProgramSemesters = Number(registerSemesters);
-    const targetGpa = Number(registerTargetGpa);
 
     if (!fullName || !email || !registerPassword || !confirmRegisterPassword) {
       setAuthError('Vui lòng điền đầy đủ các thông tin bắt buộc.');
+      return;
+    }
+    if (!isValidEmail(email)) {
+      setAuthError('Email không đúng định dạng.');
+      return;
+    }
+    if (registerPassword.length < MIN_PASSWORD_LENGTH) {
+      setAuthError(`Mật khẩu phải có ít nhất ${MIN_PASSWORD_LENGTH} ký tự.`);
       return;
     }
     if (registerPassword !== confirmRegisterPassword) {
       setAuthError('Mật khẩu nhập lại không khớp.');
       return;
     }
-    if (!Number.isInteger(totalProgramCredits) || totalProgramCredits < 1 ||
-        !Number.isInteger(totalProgramSemesters) || totalProgramSemesters < 1 ||
-        !Number.isFinite(targetGpa) || targetGpa < 0 || targetGpa > 4) {
+    if (!isRegisterProgramValid) {
       setAuthError('Tổng tín chỉ, số học kỳ hoặc GPA mục tiêu không hợp lệ.');
       return;
     }
@@ -280,9 +450,10 @@ export function useUniGradeViewModel() {
     setAuthError('');
     const fullName = registerName.trim();
     const email = registerEmail.trim();
-    const totalProgramCredits = Number(registerCredits);
-    const totalProgramSemesters = Number(registerSemesters);
-    const targetGpa = Number(registerTargetGpa);
+    if (!isRegisterProgramValid) {
+      setAuthError('Tổng tín chỉ, số học kỳ hoặc GPA mục tiêu không hợp lệ.');
+      return;
+    }
     setIsAuthBusy(true);
     pendingAuthSetup.current = true;
     try {
@@ -292,16 +463,19 @@ export function useUniGradeViewModel() {
       await createUserProfile(credential.user.uid, {
         fullName,
         email,
-        totalProgramCredits,
-        totalProgramSemesters,
-        targetGpa,
+        totalProgramCredits: registerProgramCredits,
+        totalProgramSemesters: registerProgramSemesters,
+        targetGpa: registerGpa,
       });
-      const workspace = await loadUserWorkspace(credential.user.uid);
+      const workspace = await loadUserWorkspace(credential.user.uid, credential.user);
       setFirebaseUser(credential.user);
       setProfile(workspace.profile);
       setSemesters(workspace.semesters);
       setSubjects(workspace.courses);
       setReminders(workspace.reminders);
+      setSelectedSemesterId(
+        [...workspace.semesters].sort(compareSemesters).slice(-1)[0]?.id || ''
+      );
       setIsRegisterConfirmationVisible(false);
       setCurrentScreen(3);
     } catch (error) {
@@ -319,14 +493,19 @@ export function useUniGradeViewModel() {
   const handlePasswordReset = async () => {
     setAuthError('');
     setAuthNotice('');
-    if (!resetEmail.trim()) {
+    const email = resetEmail.trim();
+    if (!email) {
       setAuthError('Vui lòng nhập email đã đăng ký.');
+      return;
+    }
+    if (!isValidEmail(email)) {
+      setAuthError('Email không đúng định dạng.');
       return;
     }
     setIsAuthBusy(true);
     try {
       const { auth } = getFirebaseServices();
-      await sendPasswordResetEmail(auth, resetEmail.trim());
+      await sendPasswordResetEmail(auth, email);
       setAuthNotice('Đã gửi email đặt lại mật khẩu. Hãy kiểm tra hộp thư của bạn.');
     } catch (error) {
       setAuthError(getFirebaseErrorMessage(error));
@@ -346,24 +525,62 @@ export function useUniGradeViewModel() {
   };
 
   const acknowledgeReminder = async () => {
-    if (!selectedReminderId) return;
+    if (!selectedReminderId || reminderWritePending.current) return;
     const acknowledgedId = selectedReminderId;
-    // Gỡ khỏi trang Nhắc thi ngay khi người dùng bấm xác nhận,
-    // không chờ có điểm CK và không phụ thuộc trạng thái học kỳ.
-    const remainingReminders = reminders.filter(
-      (reminder) => reminder.id !== acknowledgedId && !reminder.isAcknowledged
-    );
-    setReminders((current) =>
-      current.map((reminder) =>
-        reminder.id === acknowledgedId ? { ...reminder, isAcknowledged: true } : reminder
-      )
-    );
-    setSelectedReminderId(remainingReminders[0]?.id || '');
-    setCurrentScreen(10);
+    reminderWritePending.current = true;
+    setIsSavingReminder(true);
+    setOperationError('');
     try {
       await acknowledgeReminderRecord(acknowledgedId);
+      setReminders((current) => current.map((reminder) =>
+        reminder.id === acknowledgedId ? { ...reminder, isAcknowledged: true } : reminder
+      ));
+      const next = activeReminders.find((reminder) => reminder.id !== acknowledgedId);
+      setSelectedReminderId((current) => current === acknowledgedId ? next?.id || '' : current);
+      setCurrentScreen((screen) => screen === 13 ? 10 : screen);
     } catch (error) {
       setOperationError(getFirebaseErrorMessage(error));
+    } finally {
+      reminderWritePending.current = false;
+      setIsSavingReminder(false);
+    }
+  };
+
+  const snoozeReminder10m = async (reminderId) => {
+    const reminder = activeReminders.find((item) => item.id === reminderId);
+    if (!reminder || reminderWritePending.current) return false;
+    const now = Date.now();
+    if (getReminderAlarmStatus(reminder, now) !== 'due') {
+      setShadeReminderError('Chỉ có thể báo lại khi báo thức đang đến giờ.');
+      return false;
+    }
+    const snooze = getSnoozeAlarm(now);
+    const exam = parseDateTimeInput(reminder.date, reminder.time);
+    const alarm = parseDateTimeInput(snooze.alarmDate, snooze.alarmTime);
+    const validationError = exam && alarm
+      ? getReminderAlarmError(alarm, exam, now)
+      : 'Ngày hoặc giờ thi của lịch nhắc không hợp lệ.';
+    if (validationError) {
+      setShadeReminderError(validationError);
+      return false;
+    }
+    reminderWritePending.current = true;
+    setIsSavingReminder(true);
+    setShadeReminderError('');
+    try {
+      await updateReminderAlarmRecord(reminder.id, snooze.isoDate, snooze.alarmTime);
+      setReminders((current) => current.map((item) =>
+        item.id === reminder.id
+          ? { ...item, alarmDate: snooze.alarmDate, alarmTime: snooze.alarmTime }
+          : item
+      ));
+      return true;
+    } catch (error) {
+      setShadeReminderError(getFirebaseErrorMessage(error));
+      return false;
+    } finally {
+      reminderWritePending.current = false;
+      setIsSavingReminder(false);
     }
   };
 
@@ -381,11 +598,11 @@ export function useUniGradeViewModel() {
   };
 
   const saveProfileSettings = async () => {
-    const targetGpa = Number(profileTargetGpa);
-    const totalProgramCredits = Number(profileTotalCredits);
+    const targetGpa = parseTargetGpa(profileTargetGpa);
+    const totalProgramCredits = parseDecimalValue(profileTotalCredits);
 
-    if (!Number.isFinite(targetGpa) || targetGpa < 0 || targetGpa > 4) {
-      setProfileEditError('GPA mục tiêu phải nằm trong khoảng 0.00 – 4.00.');
+    if (targetGpa === null) {
+      setProfileEditError('Nhập GPA mục tiêu lớn hơn 0 và tối đa 4.00.');
       return false;
     }
     if (!Number.isInteger(totalProgramCredits) || totalProgramCredits < 1 || totalProgramCredits > 300) {
@@ -420,7 +637,10 @@ export function useUniGradeViewModel() {
   // ----- Helper: xử lý điểm & cập nhật danh sách môn (UI only, chưa có backend) -----
   const formatCourseMeta = (sub) => {
     const base = `${sub.credits} Tín chỉ • ${sub.semester} • ${sub.weights.cc}%-${sub.weights.gk}%-${sub.weights.ck}%`;
-    return sub.status === 'failed' ? `${base} • Không tính vào TC tích lũy` : base;
+    const retake = Number(sub.attemptNo) > 1 ? ` • Học lại lần ${sub.attemptNo}` : '';
+    return sub.status === 'failed'
+      ? `${base} • Không tính vào TC tích lũy${retake}`
+      : `${base}${retake}`;
   };
 
   // ----- Tính GPA / TBC tự động từ danh sách môn (UI only) -----
@@ -442,28 +662,27 @@ export function useUniGradeViewModel() {
     return {
       ...sem,
       // Trạng thái hiển thị: Đang học / Chưa xác nhận / Hoàn thành.
-      status: getSemesterDisplayStatus(sem.status, sem.year, semesters),
+      status: getSemesterDisplayStatus(sem.status, sem.year, semesters, sem.rawName),
       isConfirmed,
       // Nút "✓ Xác nhận điểm" chỉ hiện khi kỳ chưa chốt và 100% môn đã có điểm tổng kết.
       canConfirm: canConfirmSemester(sem.status, semesterCourses),
       stats: calcSemesterStats(semesterCourses),
     };
-  });
+  }).sort(compareSemesters);
 
-  const overallStats = calcSemesterStats(subjects);
+  // GPA tích lũy (CPA) chỉ tính lần học mới nhất: điểm F đã được học lại thì bị thay thế.
+  // GPA từng học kỳ vẫn dùng đủ danh sách môn ở trên nên điểm F cũ vẫn hiển thị.
+  const overallStats = calcSemesterStats(getCpaCourses(subjects));
   const remainingCredits = Math.max(0, TOTAL_PROGRAM_CREDITS - overallStats.earnedCredits);
   const overallRank = getRankByGPA(overallStats.gpa);
   const hasOverallGpa = overallStats.gradedCredits > 0;
   const overallGpaText = hasOverallGpa ? overallStats.gpa.toFixed(2) : '--';
   const overallAverageText = hasOverallGpa ? overallStats.avg10.toFixed(2) : '--';
   const emptySemesterStats = calcSemesterStats([]);
-  // Kỳ hiện tại: trong các kỳ còn "Đang học", chọn năm học lớn nhất.
+  // Kỳ hiện tại: chọn kỳ mới nhất theo năm học rồi tới số thứ tự kỳ.
   const currentSemesterStats = semesterStats
     .filter((sem) => sem.status === 'Đang học')
-    .sort(
-      (a, b) =>
-        (getAcademicYearStart(b.year) || 0) - (getAcademicYearStart(a.year) || 0)
-    )[0] || semesterStats[0] || {
+    .sort((a, b) => compareSemesters(b, a))[0] || semesterStats[semesterStats.length - 1] || {
     id: '',
     name: 'Chưa có học kỳ',
     rawName: 'Chưa có học kỳ',
@@ -471,12 +690,28 @@ export function useUniGradeViewModel() {
     status: '',
     stats: emptySemesterStats,
   };
-  const previousSemesterStats = semesterStats.find((sem) => sem.id !== currentSemesterStats.id);
+  const previousSemesterStats = semesterStats
+    .filter((sem) =>
+      sem.id !== currentSemesterStats.id &&
+      compareSemesters(sem, currentSemesterStats) < 0
+    )
+    .sort((a, b) => compareSemesters(b, a))[0]
+    || semesterStats.filter((sem) => sem.id !== currentSemesterStats.id)
+      .sort((a, b) => compareSemesters(b, a))[0];
   const gpaDelta = currentSemesterStats && previousSemesterStats
     ? Number(currentSemesterStats.stats.gpa.toFixed(2)) - Number(previousSemesterStats.stats.gpa.toFixed(2))
     : 0;
 
   const editingCourse = subjects.find((item) => item.id === selectedCourseId) || subjects[0];
+  const editedGrades = clearZeroWeightGrades(editCourseGrades, editCourseWeights);
+  const unchangedGradeInputs = editingCourse && ['cc', 'gk', 'ck'].every((key) =>
+    parseGradeValue(editedGrades[key]) === parseGradeValue(editingCourse[key]) &&
+    (parseDecimalValue(editCourseWeights[key]) ?? 0) === (parseDecimalValue(editingCourse.weights[key]) ?? 0)
+  );
+  const editedCourseTotal = calcCourseTotal(editedGrades, editCourseWeights)
+    ?? (editWeightTotal === 100 && unchangedGradeInputs && !Object.values(editedGrades).some(isGradeValueInvalid)
+      ? roundGradeTotal(editingCourse.total)
+      : null);
 
   useEffect(() => () => {
     if (courseActionNoticeTimer.current) clearTimeout(courseActionNoticeTimer.current);
@@ -535,12 +770,13 @@ export function useUniGradeViewModel() {
     setSelectedCourseId(sub.id);
     setEditCourseName(sub.name);
     setEditCourseCredits(String(sub.credits));
-    setEditCourseWeights({ ...sub.weights });
-    setEditCourseGrades({
+    const weights = { ...sub.weights };
+    setEditCourseWeights(weights);
+    setEditCourseGrades(clearZeroWeightGrades({
       cc: parseGradeValue(sub.cc) === null ? '' : sub.cc,
       gk: parseGradeValue(sub.gk) === null ? '' : sub.gk,
       ck: parseGradeValue(sub.ck) === null ? '' : sub.ck,
-    });
+    }, weights));
     setCurrentScreen(8);
   };
 
@@ -549,16 +785,18 @@ export function useUniGradeViewModel() {
       setOperationError('Học kỳ đã xác nhận điểm nên không thể sửa điểm.');
       return;
     }
-    if (editWeightTotal !== 100 || Object.values(editCourseGrades).some(isGradeValueInvalid)) return;
+    if (editWeightTotal !== 100) return;
 
     const savedCourseName = editCourseName.trim() || editingCourse.name;
+    const credits = parseCourseCredits(editCourseCredits);
     const weights = { ...editCourseWeights };
-    const grades = { ...editCourseGrades };
-    const total = calcCourseTotal(grades, weights);
+    const grades = editedGrades;
+    if (credits === null || Object.values(grades).some(isGradeValueInvalid)) return;
+    const total = editedCourseTotal;
     const missingParts = [
-      Number(weights.cc) > 0 && parseGradeValue(grades.cc) === null ? 'CC' : null,
-      Number(weights.gk) > 0 && parseGradeValue(grades.gk) === null ? 'GK' : null,
-      Number(weights.ck) > 0 && parseGradeValue(grades.ck) === null ? 'CK' : null,
+      parseDecimalValue(weights.cc) > 0 && parseGradeValue(grades.cc) === null ? 'CC' : null,
+      parseDecimalValue(weights.gk) > 0 && parseGradeValue(grades.gk) === null ? 'GK' : null,
+      parseDecimalValue(weights.ck) > 0 && parseGradeValue(grades.ck) === null ? 'CK' : null,
     ].filter(Boolean);
 
     let status = 'pending';
@@ -574,8 +812,8 @@ export function useUniGradeViewModel() {
 
     const updatedCourse = {
       ...editingCourse,
-      name: editCourseName.trim() || editingCourse.name,
-      credits: Math.min(10, Math.max(1, Number(editCourseCredits) || editingCourse.credits)),
+      name: savedCourseName,
+      credits,
       weights,
       cc: grades.cc.trim() || 'Chưa nhập',
       gk: grades.gk.trim() || 'Chưa nhập',
@@ -584,19 +822,35 @@ export function useUniGradeViewModel() {
       status,
       badge,
     };
+    // Nhập điểm ở Màn 8 -> gỡ luôn lịch nhắc đã hết tác dụng của môn này.
+    const remindersToDelete = getRemindersToDelete(reminders, updatedCourse);
+    const reminderNotice = remindersToDelete.length > 0
+      ? ` Đã tự động gỡ ${remindersToDelete.length} lịch nhắc thi của môn này.`
+      : '';
     try {
-      await updateCourseRecord(updatedCourse);
+      const enrollmentIds = await updateCourseRecords([updatedCourse], remindersToDelete);
+      updatedCourse.enrollmentDocumentId = enrollmentIds.get(updatedCourse.id);
     } catch (error) {
       setOperationError(getFirebaseErrorMessage(error));
       return;
     }
     setSubjects((current) => current.map((item) => item.id === selectedCourseId ? updatedCourse : item));
+    if (remindersToDelete.length > 0) {
+      const deletedReminderIds = new Set(remindersToDelete.map((reminder) => reminder.id));
+      const remainingReminders = reminders.filter(
+        (reminder) => !deletedReminderIds.has(reminder.id)
+      );
+      setReminders(remainingReminders);
+      if (deletedReminderIds.has(selectedReminderId)) {
+        setSelectedReminderId(remainingReminders[0]?.id || '');
+      }
+    }
 
     showCourseActionNotice({
       type: 'success',
-      message: total !== null
+      message: (total !== null
         ? `Đã cập nhật điểm “${savedCourseName}”: Tổng ${totalText} • Điểm ${badge}.`
-        : `Đã cập nhật thông tin học phần “${savedCourseName}”.`,
+        : `Đã cập nhật thông tin học phần “${savedCourseName}”.`) + reminderNotice,
     });
     setCurrentScreen(6);
   };
@@ -676,7 +930,7 @@ export function useUniGradeViewModel() {
     const remainingReminders = reminders.filter((reminder) => reminder.courseId !== courseId);
 
     try {
-      await deleteCourseAndReminders(courseId, reminders);
+      await deleteCourseAndReminders(editingCourse, reminders);
     } catch (error) {
       setOperationError(getFirebaseErrorMessage(error));
       return;
@@ -721,7 +975,7 @@ export function useUniGradeViewModel() {
     }
     setIsConfirmingSemester(true);
     try {
-      await confirmSemesterRecord(sem.id);
+      await confirmSemesterRecord(sem.id, sem.stats);
     } catch (error) {
       setOperationError(getFirebaseErrorMessage(error));
       setIsConfirmingSemester(false);
@@ -748,7 +1002,7 @@ export function useUniGradeViewModel() {
 
   const createCourse = async () => {
     const name = addCourseName.trim();
-    const credits = Number(addCourseCredits);
+    const credits = parseCourseCredits(addCourseCredits);
     const semester = semesters.find(
       (item) => getSemesterOptionLabel(item) === selectedAddCourseSemester
     );
@@ -757,8 +1011,8 @@ export function useUniGradeViewModel() {
       setAddCourseError('Vui lòng nhập tên học phần.');
       return;
     }
-    if (!Number.isInteger(credits) || credits < 1 || credits > 10) {
-      setAddCourseError('Số tín chỉ phải là số nguyên từ 1 đến 10.');
+    if (credits === null) {
+      setAddCourseError('Số tín chỉ phải là số nguyên từ 1 đến 20.');
       return;
     }
     if (!semester) {
@@ -770,7 +1024,19 @@ export function useUniGradeViewModel() {
       return;
     }
     if (addWeightTotal !== 100) {
-      setAddCourseError('Tổng trọng số phải bằng 100% mới tạo được học phần.');
+      setAddCourseError('Mỗi trọng số phải từ 0 đến 100% và tổng phải bằng 100%.');
+      return;
+    }
+
+    // Chặn trùng tên: môn đã đạt / đang học / đã có trong kỳ này thì không cho thêm.
+    // Môn đã trượt thì cho thêm và tự đánh dấu là học lại lần kế tiếp.
+    const preview = getAddCoursePreview({
+      courses: subjects,
+      name,
+      semesterId: semester.id,
+    });
+    if (preview.kind === 'blocked') {
+      setAddCourseError(preview.message);
       return;
     }
 
@@ -787,10 +1053,16 @@ export function useUniGradeViewModel() {
       ck: 'Chưa nhập',
       total: '--',
       canEdit: true,
+      attemptNo: preview.kind === 'retake' ? preview.attemptNo : 1,
+      retakeOf: preview.kind === 'retake' ? preview.latest.id : null,
+      // Dùng lại đúng dòng danh mục courses của lần học trước (học lại).
+      courseId: preview.kind === 'retake' ? preview.latest.courseId || null : null,
     };
 
     try {
-      newCourse.id = await createCourseRecord(newCourse, subjects.map((item) => item.id));
+      const created = await createCourseRecord(newCourse, subjects.map((item) => item.id));
+      newCourse.id = created.id;
+      newCourse.courseId = created.catalogId;
     } catch (error) {
       setOperationError(getFirebaseErrorMessage(error));
       return;
@@ -805,7 +1077,9 @@ export function useUniGradeViewModel() {
     setIsAddCourseSemesterOpen(false);
     showCourseActionNotice({
       type: 'success',
-      message: `Đã tạo học phần “${name}” • ${semester.rawName} (${semester.year}).`,
+      message: preview.kind === 'retake'
+        ? `Đã thêm môn “${name}” dạng học lại lần ${preview.attemptNo} • ${semester.rawName} (${semester.year}). Điểm mới sẽ thay điểm F khi tính GPA tích lũy.`
+        : `Đã tạo học phần “${name}” • ${semester.rawName} (${semester.year}).`,
     });
     setCurrentScreen(6);
   };
@@ -813,12 +1087,14 @@ export function useUniGradeViewModel() {
   // ----- Môn của HỌC KỲ HIỆN TẠI (dùng cho Dự báo What-if & Nhắc thi) -----
   // Chỉ lấy môn thuộc kỳ đang học, không lấy môn của kỳ đã qua
   const currentSemesterCourses = subjects.filter((item) => item.sem === currentSemesterStats.id);
-  const pendingCurrentCourses = currentSemesterCourses.filter((item) => parseGradeValue(item.ck) === null);
-  const reminderCourses = pendingCurrentCourses.length > 0 ? pendingCurrentCourses : currentSemesterCourses;
-  const whatIfCourses = reminderCourses.map((item) => {
-    const ccWeight = Number(item.weights.cc) || 0;
-    const gkWeight = Number(item.weights.gk) || 0;
-    const ckWeight = Number(item.weights.ck) || 0;
+  const pendingCurrentCourses = currentSemesterCourses.filter((item) =>
+    item.status === 'pending' && parseGradeValue(item.total) === null &&
+    parseGradeValue(item.ck) === null && getRemainingFinalWeight(item.weights) > 0
+  );
+  const whatIfCourses = pendingCurrentCourses.map((item) => {
+    const ccWeight = parseDecimalValue(item.weights.cc) ?? 0;
+    const gkWeight = parseDecimalValue(item.weights.gk) ?? 0;
+    const ckWeight = getRemainingFinalWeight(item.weights);
     const ccValue = parseGradeValue(item.cc);
     const gkValue = parseGradeValue(item.gk);
     const detailParts = [];
@@ -832,41 +1108,60 @@ export function useUniGradeViewModel() {
     return {
       id: item.id,
       name: `${item.name} (${item.credits} TC)`,
-      credits: item.credits,
       cc: ccValue,
       gk: gkValue,
       weights: item.weights,
-      // Trọng số CK để dự báo = phần trăm còn lại sau CC + GK.
-      remainingCkWeight: Math.max(0, 100 - ccWeight - gkWeight),
       detail: detailParts.length > 0 ? detailParts.join(' • ') : 'Chưa có trọng số thành phần',
     };
   });
 
+  // Lưu kết quả What-if vào bảng grade_forecasts khi người dùng mở Màn 9
+  // và đổi môn / mức điểm mục tiêu. Mỗi lần học chỉ có 1 bản ghi (upsert).
+  const activeWhatIfCourse = whatIfCourses[selectedWhatIfIndex] || whatIfCourses[0];
+  const activeWhatIfCourseId = activeWhatIfCourse?.id;
+  const targetGrade = getTargetGradeOption(selectedTargetGrade);
+  const forecast = activeWhatIfCourse ? getWhatIfForecast({
+    cc: activeWhatIfCourse.cc,
+    gk: activeWhatIfCourse.gk,
+    weights: activeWhatIfCourse.weights,
+    targetTen: targetGrade.ten,
+  }) : null;
+  const projectedGpa = activeWhatIfCourseId
+    ? calcSemesterStats(getCpaCourses(subjects.map((course) =>
+      course.id === activeWhatIfCourseId ? { ...course, total: targetGrade.ten, status: 'passed' } : course
+    ))).gpa
+    : overallStats.gpa;
+  const requiredFinalScore = forecast?.requiredScore ?? null;
+  useEffect(() => {
+    if (currentScreen !== 9 || !firebaseUser?.uid || !activeWhatIfCourseId) return;
+    upsertForecastRecord(activeWhatIfCourseId, {
+      targetGrade: targetGrade.key,
+      targetScore10: targetGrade.ten,
+      requiredFinalScore,
+      projectedGpa4: projectedGpa,
+    }).catch(() => {
+      // Rules chưa cập nhật hoặc mất mạng: không chặn thao tác xem dự báo.
+    });
+  }, [activeWhatIfCourseId, currentScreen, firebaseUser?.uid, targetGrade, requiredFinalScore, projectedGpa]);
+
   // ----- Lựa chọn học phần cho form nhắc thi (Màn 11) -----
-  // Chỉ gợi ý môn còn thiếu điểm thi:
-  // - Chưa có điểm CK -> được chọn (nhắc CK, và nhắc GK nếu chưa có điểm GK).
-  // - Đã có điểm GK -> khóa lựa chọn Thi Giữa kỳ, chỉ còn Thi Cuối kỳ.
-  // - Đã có điểm CK -> coi như thi xong, không hiện trong danh sách chọn nữa.
-  // - Đã tạo lịch nhắc Giữa kỳ (dù đã xác nhận hay chưa) -> khóa lựa chọn Giữa kỳ.
-  // - Đã tạo lịch nhắc Cuối kỳ (dù đã xác nhận hay chưa) -> môn biến mất khỏi danh sách.
-  // Mỗi môn chỉ có tối đa 1 lịch nhắc cho mỗi loại thi, nên phải gom toàn bộ
-  // reminders (kể cả chưa xác nhận) chứ không chỉ reminders đã xác nhận.
-  const reminderTypesByCourse = reminders.reduce((acc, reminder) => {
-    const types = acc[reminder.courseId] || [];
-    if (!types.includes(reminder.type)) types.push(reminder.type);
-    acc[reminder.courseId] = types;
-    return acc;
-  }, {});
+  // Giữ chỗ cho từng loại lịch đã đặt, kể cả khi đã xác nhận thông báo.
+  const reminderTypesByCourse = new Map();
+  for (const reminder of gradeRelevantReminders) {
+    if (isReminderBeforeToday(reminder)) continue;
+    const types = reminderTypesByCourse.get(reminder.courseId) || [];
+    types.push(reminder.type);
+    reminderTypesByCourse.set(reminder.courseId, types);
+  }
 
   const reminderCourseOptions = currentSemesterCourses
     .map((course) => ({
       course,
-      ...getReminderAvailability(course, reminderTypesByCourse[course.id] || []),
+      ...getReminderAvailability(course, reminderTypesByCourse.get(course.id)),
     }))
-    .filter((option) => option.isEligible);
+    .filter((option) => option.allowedTypes.length > 0);
 
-  // Giữ lựa chọn hợp lệ: môn đã có điểm CK bị loại khỏi danh sách, loại nhắc thi
-  // đã có điểm cũng không còn chọn được -> tự chuyển sang lựa chọn còn lại.
+  // Đồng bộ lựa chọn đang mở nếu điểm hoặc lịch nhắc thay đổi.
   const reminderCourseOptionKey = reminderCourseOptions
     .map((option) => `${option.course.id}:${option.allowedTypes.join('|')}`)
     .join(',');
@@ -876,7 +1171,8 @@ export function useUniGradeViewModel() {
     const currentOption =
       reminderCourseOptions.find((option) => option.course.id === newReminder.courseId) ||
       reminderCourseOptions[0];
-    const nextType = currentOption.allowedTypes.includes(newReminder.type)
+    const nextType = currentOption.course.id === newReminder.courseId
+      && currentOption.allowedTypes.includes(newReminder.type)
       ? newReminder.type
       : currentOption.allowedTypes[0];
     if (newReminder.courseId !== currentOption.course.id || newReminder.type !== nextType) {
@@ -894,44 +1190,17 @@ export function useUniGradeViewModel() {
     setCurrentScreen(13);
   };
 
-  // Đọc ngày DD/MM/YYYY + giờ HH:MM thành Date để so sánh báo thức với giờ thi.
-  const parseDateTimeInput = (dateValue, timeValue) => {
-    const dateMatch = String(dateValue || '').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-    const timeMatch = String(timeValue || '').trim().match(/^(\d{1,2}):(\d{2})$/);
-    if (!dateMatch || !timeMatch) return null;
-    const day = Number(dateMatch[1]);
-    const month = Number(dateMatch[2]);
-    const year = Number(dateMatch[3]);
-    const hour = Number(timeMatch[1]);
-    const minute = Number(timeMatch[2]);
-    if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59) return null;
-    const parsed = new Date(year, month - 1, day, hour, minute, 0, 0);
-    if (
-      parsed.getFullYear() !== year ||
-      parsed.getMonth() !== month - 1 ||
-      parsed.getDate() !== day
-    ) {
-      return null;
-    }
-    return parsed;
-  };
-
   const saveNewReminder = async () => {
+    if (reminderWritePending.current) return;
     const selectedOption = reminderCourseOptions.find(
       (option) => option.course.id === newReminder.courseId
     );
     if (!selectedOption) {
-      setReminderFormError(
-        'Học phần này đã có lịch nhắc thi cuối kỳ hoặc đã có điểm cuối kỳ. Vui lòng chọn học phần khác.'
-      );
+      setReminderFormError('Học phần này không còn loại lịch nhắc có thể đặt. Vui lòng chọn học phần khác.');
       return;
     }
     if (!selectedOption.allowedTypes.includes(newReminder.type)) {
-      setReminderFormError(
-        newReminder.type === 'mid'
-          ? 'Học phần này đã có điểm giữa kỳ hoặc đã có lịch nhắc thi giữa kỳ. Vui lòng chọn loại Thi Cuối kỳ.'
-          : 'Học phần này đã có lịch nhắc thi cuối kỳ hoặc đã có điểm cuối kỳ. Vui lòng chọn học phần khác.'
-      );
+      setReminderFormError('Vui lòng chọn loại lịch nhắc còn khả dụng cho học phần này.');
       return;
     }
     const course = selectedOption.course;
@@ -944,6 +1213,17 @@ export function useUniGradeViewModel() {
       setReminderFormError('Ngày thi cần đúng dạng DD/MM/YYYY và giờ thi dạng HH:MM.');
       return;
     }
+    // Chặn ngày giờ trong quá khứ, trùng loại lịch của cùng môn và trùng giờ thi.
+    const validationError = getNewReminderError({
+      courseId: course.id,
+      type: newReminder.type,
+      examDateTime,
+      reminders: gradeRelevantReminders,
+    });
+    if (validationError) {
+      setReminderFormError(validationError);
+      return;
+    }
     if (!newReminder.alarmDate.trim() || !newReminder.alarmTime.trim()) {
       setReminderFormError('Vui lòng nhập ngày và giờ báo thức trước giờ thi.');
       return;
@@ -953,8 +1233,9 @@ export function useUniGradeViewModel() {
       setReminderFormError('Ngày báo thức cần đúng dạng DD/MM/YYYY và giờ báo thức dạng HH:MM.');
       return;
     }
-    if (alarmDateTime.getTime() >= examDateTime.getTime()) {
-      setReminderFormError('Thời điểm báo thức phải trước giờ thi.');
+    const alarmError = getReminderAlarmError(alarmDateTime, examDateTime);
+    if (alarmError) {
+      setReminderFormError(alarmError);
       return;
     }
 
@@ -974,11 +1255,17 @@ export function useUniGradeViewModel() {
       isAcknowledged: false,
     };
 
+    reminderWritePending.current = true;
+    setIsSavingReminder(true);
+    setReminderFormError('');
     try {
       reminder.id = await createReminderRecord(reminder, reminders.map((item) => item.id));
     } catch (error) {
-      setOperationError(getFirebaseErrorMessage(error));
+      setReminderFormError(getFirebaseErrorMessage(error));
       return;
+    } finally {
+      reminderWritePending.current = false;
+      setIsSavingReminder(false);
     }
     setReminders((current) => [reminder, ...current]);
     setSelectedReminderId(reminder.id);
@@ -986,7 +1273,7 @@ export function useUniGradeViewModel() {
     setIsReminderCourseOpen(false);
     setNewReminder({
       courseId: course.id,
-      type: 'final',
+      type: '',
       date: '',
       time: '',
       room: '',
@@ -1001,8 +1288,8 @@ export function useUniGradeViewModel() {
     const escapeCsv = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
     const scoreCell = (value) => (parseGradeValue(value) === null ? '' : String(value));
     const rows = subjects.map((item) => {
-      const letterInfo = parseLetterGrade(item.badge);
-      const total = parseGradeValue(item.total);
+      const total = roundGradeTotal(item.total);
+      const letterInfo = getGradeLetter(total);
       return [
         item.semester,
         item.name,
@@ -1046,6 +1333,9 @@ export function useUniGradeViewModel() {
     try {
       const selection = await DocumentPicker.getDocumentAsync({
         type: [
+          'text/csv',
+          'text/comma-separated-values',
+          'application/csv',
           'application/vnd.ms-excel',
           'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         ],
@@ -1054,39 +1344,38 @@ export function useUniGradeViewModel() {
       if (selection.canceled || !selection.assets || selection.assets.length === 0) return;
 
       const file = selection.assets[0];
-      const isExcelFile = /\.(xls|xlsx)$/i.test(file.name || file.uri);
-      if (!isExcelFile) {
-        showGradeImportMessage('Vui lòng chọn file Excel có định dạng .xls hoặc .xlsx.', 'error');
+      const fileExtension = (file.name || file.uri).toLowerCase().match(/\.(csv|xls|xlsx)$/)?.[1];
+      if (!fileExtension) {
+        showGradeImportMessage('Vui lòng chọn file .csv, .xls hoặc .xlsx.', 'error');
         return;
       }
 
+      const isCsv = fileExtension === 'csv';
+      const isWeb = Platform.OS === 'web';
       const workbookData =
-        Platform.OS === 'web'
+        isWeb
           ? await fetch(file.uri).then((response) => {
               if (!response.ok) throw new Error('Không thể đọc file đã chọn.');
-              return response.arrayBuffer();
+              return isCsv ? response.text() : response.arrayBuffer();
             })
           : await FileSystem.readAsStringAsync(file.uri, {
-              encoding: FileSystem.EncodingType.Base64,
+              encoding: isCsv ? FileSystem.EncodingType.UTF8 : FileSystem.EncodingType.Base64,
             });
-      const workbook = Excel.read(workbookData, {
-        type: Platform.OS === 'web' ? 'array' : 'base64',
-      });
-      const firstSheetName = workbook.SheetNames[0];
-      if (!firstSheetName) {
-        showGradeImportMessage('File Excel không có trang tính để nhập.', 'error');
+      const binaryType = isWeb ? 'array' : 'base64';
+      const rows = readGradeImportRows(workbookData, isCsv ? 'string' : binaryType);
+      if (!rows) {
+        showGradeImportMessage('File không có bảng điểm để nhập.', 'error');
         return;
       }
 
-      const rows = Excel.utils.sheet_to_json(workbook.Sheets[firstSheetName], {
-        header: 1,
-        defval: '',
-        raw: false,
-      });
       const importResult = parseGradeSheet(rows, subjects);
       if (importResult.headerRowIndex === -1) {
+        const missingColumns = importResult.missingColumns || [];
+        const missingText = missingColumns.length > 0
+          ? `File thiếu cột: ${missingColumns.join(', ')}. `
+          : '';
         showGradeImportMessage(
-          'Không nhận diện được tiêu đề cột. Cần có Tên môn học và ít nhất một cột điểm (CC/QT/BT, GK, CK, Thang 10, Thang 4 hoặc Chữ).',
+          `${missingText}${IMPORT_REQUIRED_COLUMNS_MESSAGE}`,
           'error'
         );
         return;
@@ -1094,9 +1383,16 @@ export function useUniGradeViewModel() {
 
       const importedSubjectIds = getImportedSubjectIds(importResult);
       const newCourseRows = importResult.newCourses || [];
+      const invalidRows = importResult.invalidRows;
+      const invalidDetails = invalidRows.slice(0, 3).map(({ rowNumber, fields }) =>
+        `Dòng ${rowNumber} (${fields.join(', ')})`
+      ).join('; ');
+      const invalidMessage = invalidDetails
+        ? ` Dữ liệu không hợp lệ: ${invalidDetails}${invalidRows.length > 3 ? ` và ${invalidRows.length - 3} dòng khác` : ''}.`
+        : '';
       if (importedSubjectIds.size === 0 && newCourseRows.length === 0) {
         showGradeImportMessage(
-          'Không có điểm hợp lệ để nhập. Kiểm tra lại Tên môn học, Kỳ/Năm học và điểm trong file có khớp với app không (môn mới cần thêm Số TC).',
+          invalidMessage.trim() || 'Không có dữ liệu hợp lệ để nhập. Kiểm tra học kỳ, tên môn, số tín chỉ và điểm trong file.',
           'error'
         );
         return;
@@ -1115,6 +1411,28 @@ export function useUniGradeViewModel() {
         const label = parseSemesterLabel(`${semester.rawName} ${semester.year}`);
         if (label) semesterByCanonical.set(label.canonical, semester);
       });
+
+      const importedCoursesToValidate = newCourseRows.flatMap((row) => {
+        const info = row.semesterInfo;
+        const semesterId = buildSemesterId(info);
+        const semester = semesterByCanonical.get(info.canonical)
+          || semesters.find((item) => item.id === semesterId);
+        if (semester && lockedSemesterIds.has(semester.id)) return [];
+        return [buildCourseFromImportRow(row, semester || {
+          id: semesterId,
+          rawName: `Học kỳ ${info.term}`,
+          year: `${info.startYear} - ${info.endYear}`,
+          status: 'Đang học',
+        })];
+      });
+      const importBlocker = getCourseImportBlocker(subjects, importedCoursesToValidate);
+      if (importBlocker) {
+        showGradeImportMessage(
+          `Không thể nhập file bảng điểm: ${importBlocker.preview.message} Toàn bộ file đã bị hủy, chưa có thay đổi nào được lưu.`,
+          'error'
+        );
+        return;
+      }
 
       let lockedSkippedCount = 0;
       for (const row of newCourseRows) {
@@ -1141,10 +1459,23 @@ export function useUniGradeViewModel() {
         }
 
         const newCourse = buildCourseFromImportRow(row, semester);
-        newCourse.id = await createCourseRecord(newCourse, [
+        // Nhập Excel gặp môn đã trượt trước đó -> tự nối thành học lại để GPA tích lũy thay điểm F.
+        const importPreview = getAddCoursePreview({
+          courses: [...subjects, ...createdSubjects],
+          name: newCourse.name,
+          semesterId: semester.id,
+        });
+        if (importPreview.kind === 'retake') {
+          newCourse.retakeOf = importPreview.latest.id;
+          newCourse.attemptNo = importPreview.attemptNo;
+          newCourse.courseId = importPreview.latest.courseId || null;
+        }
+        const created = await createCourseRecord(newCourse, [
           ...subjects.map((item) => item.id),
           ...createdSubjects.map((item) => item.id),
         ]);
+        newCourse.id = created.id;
+        newCourse.courseId = created.catalogId;
         createdSubjects.push(newCourse);
       }
 
@@ -1171,10 +1502,27 @@ export function useUniGradeViewModel() {
       const editableUpdates = nextSubjects.filter(
         (subject) => importedSubjectIds.has(subject.id) && !lockedSemesterIds.has(subject.sem)
       );
-      if (editableUpdates.length > 0) {
-        await updateCourseRecords(editableUpdates);
+      // Xét kết quả cuối cùng sau khi ghép điểm và trọng số nhập từ Excel.
+      const remindersToDelete = editableUpdates.flatMap((course) => getRemindersToDelete(reminders, course));
+      const enrollmentIds = editableUpdates.length > 0 || remindersToDelete.length > 0
+        ? await updateCourseRecords(editableUpdates, remindersToDelete)
+        : new Map();
+      setSubjects([
+        ...nextSubjects.map((subject) => enrollmentIds.has(subject.id)
+          ? { ...subject, enrollmentDocumentId: enrollmentIds.get(subject.id) }
+          : subject),
+        ...createdSubjects,
+      ]);
+      if (remindersToDelete.length > 0) {
+        const deletedReminderIds = new Set(remindersToDelete.map((reminder) => reminder.id));
+        const remainingReminders = reminders.filter(
+          (reminder) => !deletedReminderIds.has(reminder.id)
+        );
+        setReminders(remainingReminders);
+        if (deletedReminderIds.has(selectedReminderId)) {
+          setSelectedReminderId(remainingReminders[0]?.id || '');
+        }
       }
-      setSubjects([...nextSubjects, ...createdSubjects]);
       if (createdSemesters.length > 0) {
         setSemesters((current) => [...current, ...createdSemesters]);
       }
@@ -1186,6 +1534,9 @@ export function useUniGradeViewModel() {
       }
       if (creditsOnlyCount > 0) {
         summaryParts.push(`Đã cập nhật tín chỉ cho ${creditsOnlyCount} môn`);
+      }
+      if (remindersToDelete.length > 0) {
+        summaryParts.push(`Đã gỡ ${remindersToDelete.length} lịch nhắc thi đã hết tác dụng`);
       }
       if (createdSubjects.length > 0) {
         summaryParts.push(
@@ -1204,7 +1555,7 @@ export function useUniGradeViewModel() {
         ? `${summaryParts.join(', ')}.`
         : 'Không có thay đổi nào được ghi.';
       showGradeImportMessage(
-        `${importSummary}${importResult.skippedRows ? ` Bỏ qua ${importResult.skippedRows} dòng không khớp hoặc không hợp lệ.` : ''}`,
+        `${importSummary}${importResult.skippedRows ? ` Bỏ qua ${importResult.skippedRows} dòng không khớp hoặc không hợp lệ.` : ''}${invalidMessage}`,
         'success'
       );
     } catch (error) {
@@ -1216,7 +1567,7 @@ export function useUniGradeViewModel() {
         setSubjects((current) => [...current, ...createdSubjects]);
       }
       showGradeImportMessage(
-        `Không thể nhập file Excel: ${error instanceof Error ? error.message : 'Lỗi không xác định.'}`,
+        `Không thể nhập file bảng điểm: ${error instanceof Error ? error.message : 'Lỗi không xác định.'}`,
         'error'
       );
     }
@@ -1246,7 +1597,7 @@ export function useUniGradeViewModel() {
     loginPassword,
     setLoginPassword,
     rememberPassword,
-    setRememberPassword,
+    setRememberPassword: updateRememberPassword,
     registerName,
     setRegisterName,
     registerEmail,
@@ -1266,7 +1617,12 @@ export function useUniGradeViewModel() {
     resetEmail,
     setResetEmail,
     isShadeOpen,
-    setIsShadeOpen,
+    hasDueAlarm: canShowReminderShade && hasDueAlarm,
+    openReminderShade,
+    shadeReminderId,
+    shadeReminderError,
+    closeShade,
+    snoozeReminder10m,
     shadePanResponder,
     semesterYearQuery,
     setSemesterYearQuery,
@@ -1314,6 +1670,7 @@ export function useUniGradeViewModel() {
     setAddCourseCredits,
     addCourseError,
     setAddCourseError,
+    addCoursePreview,
     courseSemesterOptions,
     addCourseWeights,
     setAddCourseWeights,
@@ -1340,6 +1697,7 @@ export function useUniGradeViewModel() {
     confirmSemesterGrades,
     reminders,
     setReminders,
+    activeReminders,
     selectedReminderId,
     setSelectedReminderId,
     isReminderCourseOpen,
@@ -1348,6 +1706,7 @@ export function useUniGradeViewModel() {
     setNewReminder,
     reminderFormError,
     setReminderFormError,
+    isSavingReminder,
     profileNotice,
     setProfileNotice,
     isProfileEditOpen,
@@ -1386,6 +1745,7 @@ export function useUniGradeViewModel() {
     previousSemesterStats,
     gpaDelta,
     editingCourse,
+    editedCourseTotal,
     showCourseActionNotice,
     dismissCourseActionNotice,
     openEditCourse,
@@ -1393,11 +1753,10 @@ export function useUniGradeViewModel() {
     createSemester,
     deleteEditingCourse,
     createCourse,
-    currentSemesterCourses,
-    pendingCurrentCourses,
-    reminderCourses,
     reminderCourseOptions,
     whatIfCourses,
+    forecast,
+    projectedGpa,
     openReminderDetail,
     saveNewReminder,
     exportGradeData,

@@ -1,15 +1,15 @@
 // Tầng Service: dự báo điểm thi cuối kỳ (What-if).
 // Quy tắc: trọng số CK dùng để dự báo = 100% - (CC + GK).
 // Nhờ vậy môn CK 100% (CC/GK 0%) vẫn dự báo được, còn môn 50/50 chỉ cần điểm GK.
-import { parseGradeValue } from './gradeService';
+import { parseDecimalValue, parseGradeValue } from './gradeService';
 
 export const getRemainingFinalWeight = (weights = {}) =>
-  Math.max(0, 100 - (Number(weights.cc) || 0) - (Number(weights.gk) || 0));
+  Math.max(0, 100 - (parseDecimalValue(weights.cc) ?? 0) - (parseDecimalValue(weights.gk) ?? 0));
 
 // Trả về toàn bộ dữ liệu cần hiển thị cho màn Dự báo và Chi tiết nhắc thi.
 export const getWhatIfForecast = ({ cc, gk, weights, targetTen }) => {
-  const ccWeight = Number(weights?.cc) || 0;
-  const gkWeight = Number(weights?.gk) || 0;
+  const ccWeight = parseDecimalValue(weights?.cc) ?? 0;
+  const gkWeight = parseDecimalValue(weights?.gk) ?? 0;
   const ckWeight = getRemainingFinalWeight(weights);
   const ccValue = parseGradeValue(cc);
   const gkValue = parseGradeValue(gk);

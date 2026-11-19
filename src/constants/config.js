@@ -20,6 +20,22 @@ export const getSemesterOptionLabel = (semester) =>
 
 export const EMAIL_ALREADY_EXISTS_MESSAGE = 'Email này đã tồn tại. Vui lòng dùng email khác.';
 
+// Kiểm tra đầu vào của Màn 1 (Đăng nhập) và Màn 2 (Đăng ký) ngay trên form.
+export const MIN_PASSWORD_LENGTH = 6;
+export const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+export const isValidEmail = (value) => EMAIL_PATTERN.test(String(value ?? '').trim());
+
+// Các mức điểm tổng kết dùng cho ô chọn ở màn Dự báo What-if + bảng grade_forecasts.
+export const TARGET_GRADE_OPTIONS = [
+  { key: 'A+', label: 'A+ (9.0)', ten: 9.0, point: 4.0 },
+  { key: 'A', label: 'A (8.5)', ten: 8.5, point: 3.7 },
+  { key: 'B+', label: 'B+ (8.0)', ten: 8.0, point: 3.5 },
+  { key: 'B', label: 'B (7.0)', ten: 7.0, point: 3.0 },
+];
+
+export const getTargetGradeOption = (key) =>
+  TARGET_GRADE_OPTIONS.find((option) => option.key === key) || TARGET_GRADE_OPTIONS[0];
+
 export const getFirebaseErrorMessage = (error) => {
   const messages = {
     'auth/invalid-email': 'Email không đúng định dạng.',

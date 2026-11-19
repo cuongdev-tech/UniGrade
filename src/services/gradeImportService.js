@@ -1,6 +1,19 @@
-// Đọc bảng điểm từ Excel: nhận diện tiêu đề, ghép tên môn, đọc điểm và trọng số.
+// Đọc bảng điểm từ CSV hoặc Excel: nhận diện tiêu đề, ghép tên môn, đọc điểm và trọng số.
 // Tách khỏi ViewModel để dễ kiểm thử độc lập với Firebase/giao diện.
-import { parseGradeValue, calcCourseTotal, getGradeLetter, parseLetterGrade, getLetterByPoint, LETTER_POINTS } from './gradeService';
+import { read, utils } from 'xlsx';
+import {
+  parseGradeValue,
+  parseCourseCredits,
+  parseDecimalValue,
+  calcCourseTotal,
+  clearZeroWeightGrades,
+  getCourseWeightTotal,
+  getGradeLetter,
+  parseLetterGrade,
+  getLetterByPoint,
+  reconcileGkCkOrder,
+  resolveGradeTotal,
+} from './gradeService';
 
 // Bỏ dấu tiếng Việt + ký tự lạ để so tên cột/tên môn.
 // Lưu ý: NFD không tách được "đ" nên phải đổi tay ("Điểm CC" -> "diemcc").
@@ -31,8 +44,9 @@ export const IMPORT_HEADER_ALIASES = {
   ],
   credits: ['sotc', 'sotinchi', 'tinchi', 'tc', 'credits', 'credit'],
   // Điểm tổng kết trường đã tính sẵn: dùng để đối chiếu/ưu tiên hơn tự tính.
+  // Cột "Điểm" chung (đề bài yêu cầu) được hiểu là điểm tổng kết thang 10.
   total10: [
-    'thang10', 'diemthang10', 'thangdiem10', 'he10', 'diemhe10', 'tongket', 'diemtongket',
+    'diem', 'thang10', 'diemthang10', 'thangdiem10', 'he10', 'diemhe10', 'tongket', 'diemtongket',
   ],
   total4: ['thang4', 'diemthang4', 'thangdiem4', 'he4', 'diemhe4'],
   // Chữ: A+, A, B+ ... F.
@@ -42,13 +56,13 @@ export const IMPORT_HEADER_ALIASES = {
 // Đọc nhãn học kỳ kiểu "1/2026-2027", "HK1 (2026 - 2027)", "Học kỳ 2 (2025-2026)".
 // Trả về khóa chuẩn để so với môn đang có trong app (không phụ thuộc cách viết).
 export const parseSemesterLabel = (value) => {
-  const raw = String(value ?? '').trim();
-  if (!raw) return null;
-  const match = raw.match(/(\d)\D{0,8}(\d{4})\s*[-–]\s*(\d{4})/);
+  const normalized = String(value ?? '').trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const match = normalized.match(/^(?:(?:hoc\s*ky|hk|ky|semester|term)\s*)?(\d{1,2}|he|summer)(\s*\(\s*|\s*[/:-]\s*|\s+)(\d{4})\s*[-–]\s*(\d{4})(\s*\))?$/i);
   if (!match) return null;
-  const term = match[1];
-  const startYear = match[2];
-  const endYear = match[3];
+  const [, rawTerm, separator, startYear, endYear, closing] = match;
+  if (separator.includes('(') !== Boolean(closing) || Number(endYear) !== Number(startYear) + 1) return null;
+  const term = String(/^\d+$/.test(rawTerm) ? Number(rawTerm) : 3);
+  if (term === '0') return null;
   return {
     term,
     startYear,
@@ -78,52 +92,35 @@ const FORMULA_KEY_BY_TOKEN = {
 export const parseGradeFormula = (value) => {
   const raw = String(value ?? '').replace(/\s+/g, '').toLowerCase();
   if (!raw) return null;
-  const tokens = [...raw.matchAll(/\[([a-z0-9]+)\][*x×](\d+(?:[.,]\d+)?)/g)];
-  if (tokens.length === 0) return null;
+  const tokens = raw.split('+').map((part) => part.match(/^\[([a-z0-9]+)\][*x×](\d+(?:[.,]\d+)?)(%?)$/));
+  if (tokens.some((token) => !token || !Object.prototype.hasOwnProperty.call(FORMULA_KEY_BY_TOKEN, token[1]))) return null;
 
   const parts = { cc: 0, gk: 0, ck: 0 };
   const ccTokens = [];
-  let total = 0;
-  tokens.forEach((match) => {
-    const token = match[1];
-    const weight = parseFloat(match[2].replace(',', '.'));
-    if (!Number.isFinite(weight)) return;
-    total += weight;
+  const percent = tokens[0][3];
+  if (tokens.some((token) => token[3] !== percent)) return null;
+  for (const [, token, rawWeight] of tokens) {
+    const weight = parseDecimalValue(rawWeight);
+    if (weight === null) return null;
     const key = FORMULA_KEY_BY_TOKEN[token];
-    if (!key) return;
     parts[key] += weight;
     if (key === 'cc' && !ccTokens.includes(token)) ccTokens.push(token);
-  });
-
-  const isFraction = Math.abs(total - 1) < 0.001;
-  const isPercent = Math.abs(total - 100) < 0.01;
-  if (!isFraction && !isPercent) return null;
-
-  const factor = isFraction ? 100 : 1;
-  const weights = {
-    cc: parts.cc * factor,
-    gk: parts.gk * factor,
-    ck: parts.ck * factor,
-  };
-  if (Math.abs(weights.cc + weights.gk + weights.ck - 100) > 0.1) return null;
-
-  return {
-    weights: {
-      cc: String(Number(weights.cc.toFixed(2))),
-      gk: String(Number(weights.gk.toFixed(2))),
-      ck: String(Number(weights.ck.toFixed(2))),
-    },
-    ccTokens,
-  };
+  }
+  const sum = parts.cc + parts.gk + parts.ck;
+  const factor = !percent && Math.abs(sum - 1) < 1e-9 ? 100 : 1;
+  const weights = Object.fromEntries(Object.entries(parts).map(([key, weight]) =>
+    [key, String(Number((weight * factor).toFixed(8)))]
+  ));
+  return getCourseWeightTotal(weights) === 100 ? { weights, ccTokens } : null;
 };
 
 // Dựng lại chuỗi "Công thức điểm" từ trọng số để xuất CSV nhập lại được.
 // Tổng luôn bằng 1.00; trọng số 0% bị bỏ khỏi công thức.
 export const buildGradeFormula = (weights) => {
   const parts = [
-    { token: 'CC', weight: Number(weights?.cc) || 0 },
-    { token: 'GK', weight: Number(weights?.gk) || 0 },
-    { token: 'CK', weight: Number(weights?.ck) || 0 },
+    { token: 'CC', weight: parseDecimalValue(weights?.cc) ?? 0 },
+    { token: 'GK', weight: parseDecimalValue(weights?.gk) ?? 0 },
+    { token: 'CK', weight: parseDecimalValue(weights?.ck) ?? 0 },
   ].filter((part) => part.weight > 0);
   if (parts.length === 0) return '';
 
@@ -161,12 +158,44 @@ const mergeNewCourse = (previous, next) => {
   };
 };
 
+// File Excel nhập điểm bắt buộc đủ 5 cột: Học kỳ, Tên môn, Số TC, Trọng số, Điểm.
+// "Điểm" chấp nhận một trong các cột điểm: CC/QT/BT, GK, CK, Thang 10, Thang 4, Chữ.
+export const getMissingImportHeaderColumns = (foundColumns = {}) => {
+  const isMissing = (key) => foundColumns[key] === undefined || foundColumns[key] === -1;
+  const missing = [];
+  if (isMissing('semester')) missing.push('Học kỳ');
+  if (isMissing('name')) missing.push('Tên môn');
+  if (isMissing('credits')) missing.push('Số TC');
+  if (isMissing('formula')) missing.push('Trọng số');
+  const hasGradeColumn = ['cc', 'gk', 'ck', 'total10', 'total4', 'letter']
+    .some((key) => !isMissing(key));
+  if (!hasGradeColumn) missing.push('Điểm');
+  return missing;
+};
+
+export const IMPORT_REQUIRED_COLUMNS_MESSAGE =
+  'Cần đủ 5 cột: Học kỳ, Tên môn, Số TC, Trọng số, Điểm.';
+
+export const readGradeImportRows = (data, type) => {
+  const workbook = type === 'string'
+    ? read(data.replace(/^\uFEFF/, ''), { type, raw: true })
+    : read(data, { type });
+  const firstSheetName = workbook.SheetNames[0];
+  if (!firstSheetName) return null;
+  return utils.sheet_to_json(workbook.Sheets[firstSheetName], {
+    header: 1,
+    defval: '',
+    raw: false,
+  });
+};
+
 // rows: mảng các dòng (mảng ô) đọc từ sheet đầu tiên.
 // subjects: danh sách môn đang có trong app.
 // newCourses: môn chưa có trong app nhưng dòng Excel có đủ Kỳ/Năm học + Số TC + điểm.
 export const parseGradeSheet = (rows, subjects) => {
   const emptyResult = {
     headerRowIndex: -1,
+    missingColumns: [],
     gradesBySubject: new Map(),
     weightsBySubject: new Map(),
     creditsBySubject: new Map(),
@@ -175,12 +204,15 @@ export const parseGradeSheet = (rows, subjects) => {
     letterBySubject: new Map(),
     newCourses: [],
     skippedRows: 0,
+    invalidRows: [],
   };
   if (!Array.isArray(rows) || rows.length === 0) return emptyResult;
 
   let headerRowIndex = -1;
   let headerCells = [];
   let columns = {};
+  let bestMissingColumns = null;
+  let bestMatchedCount = -1;
   // Quét 50 dòng đầu: bảng điểm thật thường có tiêu đề/thông tin sinh viên phía trên.
   for (let rowIndex = 0; rowIndex < Math.min(rows.length, 50); rowIndex += 1) {
     const headers = rows[rowIndex].map(normalizeImportHeader);
@@ -188,17 +220,27 @@ export const parseGradeSheet = (rows, subjects) => {
     Object.entries(IMPORT_HEADER_ALIASES).forEach(([key, aliases]) => {
       foundColumns[key] = headers.findIndex((header) => aliases.includes(header));
     });
-    if (
-      foundColumns.name !== -1
-      && ['cc', 'gk', 'ck', 'total10', 'total4', 'letter'].some((key) => foundColumns[key] !== -1)
-    ) {
+    const missingColumns = getMissingImportHeaderColumns(foundColumns);
+    const matchedCount = Object.values(foundColumns).filter((index) => index !== -1).length;
+    // Ghi nhớ dòng giống tiêu đề nhất để báo đúng các cột còn thiếu.
+    if (missingColumns.length > 0 && foundColumns.name !== -1 && matchedCount > bestMatchedCount) {
+      bestMatchedCount = matchedCount;
+      bestMissingColumns = missingColumns;
+    }
+    if (missingColumns.length === 0) {
       headerRowIndex = rowIndex;
       headerCells = headers;
       columns = foundColumns;
       break;
     }
   }
-  if (headerRowIndex === -1) return emptyResult;
+  if (headerRowIndex === -1) {
+    return {
+      ...emptyResult,
+      missingColumns: bestMissingColumns
+        || ['Học kỳ', 'Tên môn', 'Số TC', 'Trọng số', 'Điểm'],
+    };
+  }
 
   // Các cột có thể chứa điểm CC (CC / QT / BT...). Dùng cột nào có số trước.
   const ccColumnIndexes = headerCells.reduce((list, header, index) => {
@@ -231,105 +273,82 @@ export const parseGradeSheet = (rows, subjects) => {
   const total4BySubject = new Map();
   const letterBySubject = new Map();
   const newCoursesByKey = new Map();
+  const invalidRows = [];
   let skippedRows = 0;
 
-  for (const row of rows.slice(headerRowIndex + 1)) {
-    const name = String(row[columns.name] || '').trim();
+  for (let rowIndex = headerRowIndex + 1; rowIndex < rows.length; rowIndex += 1) {
+    const row = rows[rowIndex];
+    const readCell = (index) => String(row[index] ?? '').trim();
+    const name = readCell(columns.name);
     if (!name) continue;
 
-    const candidates = subjectsByName.get(normalizeImportHeader(name)) || [];
-    const rowSemester = columns.semester !== -1 ? parseSemesterLabel(row[columns.semester]) : null;
-    let subject = null;
-    if (rowSemester) {
-      subject = candidates.find((item) => {
-        const itemSemester = parseSemesterLabel(item.semester);
-        return itemSemester && itemSemester.canonical === rowSemester.canonical;
-      }) || null;
-    }
-    // Không có cột Kỳ/Năm học: nhận theo tên nếu tên môn là duy nhất.
-    // Có Kỳ/Năm học nhưng khác kỳ của mọi môn trùng tên: coi là môn mới, không sửa nhầm môn cũ.
-    if (!subject && !rowSemester && candidates.length === 1) subject = candidates[0];
+    const rowSemester = parseSemesterLabel(readCell(columns.semester));
+    const rawCredits = readCell(columns.credits);
+    const rowCredits = parseCourseCredits(rawCredits);
+    const rawFormula = readCell(columns.formula);
+    const rowFormula = parseGradeFormula(rawFormula);
+    const invalidFields = [];
+    if (!rowSemester) invalidFields.push('Học kỳ');
+    if (rawCredits && rowCredits === null) invalidFields.push('Số TC');
+    if (rawFormula && !rowFormula) invalidFields.push('Trọng số');
 
-    // Đọc tín chỉ vào biến tạm; chỉ ghi vào kết quả khi dòng hợp lệ.
-    let rowCredits = null;
-    if (columns.credits !== -1) {
-      const rawCredits = String(row[columns.credits] ?? '').replace(',', '.');
-      const creditsValue = parseFloat(rawCredits);
-      const credits = Number.isFinite(creditsValue) ? Math.round(creditsValue) : NaN;
-      if (Number.isFinite(credits) && credits > 0 && credits <= 30) {
-        rowCredits = credits;
+    const readScore = (index, label, maximum = 10) => {
+      const raw = readCell(index);
+      const value = parseGradeValue(raw);
+      if (raw && (value === null || value > maximum)) {
+        invalidFields.push(label);
+        return null;
       }
-    }
-
-    const rowFormula = columns.formula !== -1 ? parseGradeFormula(row[columns.formula]) : null;
-
-    const nextGrades = subject ? (gradesBySubject.get(subject.id) || {}) : {};
-    let hasGrade = false;
-    let invalidGrade = false;
-    const applyGrade = (key, columnIndex) => {
-      if (columnIndex === -1 || columnIndex === undefined) return false;
-      const raw = String(row[columnIndex] ?? '').trim();
-      if (raw === '') return false;
-      const grade = parseGradeValue(raw);
-      if (grade === null || grade < 0 || grade > 10) {
-        invalidGrade = true;
-        return false;
-      }
-      nextGrades[key] = grade.toFixed(1);
-      hasGrade = true;
-      return true;
+      return value;
     };
+    const rawLetter = readCell(columns.letter);
+    const importedLetter = /^[A-F]\+?(?:\s*\(\s*\d+(?:[.,]\d+)?\s*\))?$/i.test(rawLetter)
+      ? parseLetterGrade(rawLetter)?.letter ?? null
+      : null;
+    if (rawLetter && !importedLetter) invalidFields.push('Điểm chữ');
+    const importedTotal10 = readScore(columns.total10, 'Thang 10');
+    const importedTotal4 = readScore(columns.total4, 'Thang 4', 4);
 
-    // Điểm CC: ưu tiên đúng cột mà công thức dùng (BT hay QT), sau đó cột CC/QT/BT đầu tiên có số.
-    const preferredCcIndexes = rowFormula
-      ? rowFormula.ccTokens.map(findColumnForToken).filter((index) => index !== -1)
-      : [];
+    // Kiểm tra mọi cột CC/QT/BT, rồi mới chọn giá trị theo thứ tự ưu tiên của công thức.
+    const preferredCcIndexes = rowFormula?.ccTokens.map(findColumnForToken).filter((index) => index !== -1) || [];
     const ccIndexes = [...new Set([...preferredCcIndexes, ...ccColumnIndexes])];
-    for (const columnIndex of ccIndexes) {
-      if (applyGrade('cc', columnIndex)) break;
-    }
-    applyGrade('gk', columns.gk);
-    applyGrade('ck', columns.ck);
-
-    if (invalidGrade) {
+    const ccScores = ccIndexes.map((index) => readScore(index, 'CC/QT/BT'));
+    const gk = readScore(columns.gk, 'GK');
+    const ck = readScore(columns.ck, 'CK');
+    if (invalidFields.length > 0) {
       skippedRows += 1;
+      invalidRows.push({ rowNumber: rowIndex + 1, fields: [...new Set(invalidFields)] });
       continue;
     }
 
-    // Thang 10 / Thang 4 / Chữ do trường tính sẵn.
-    let importedTotal10 = null;
-    if (columns.total10 !== -1) {
-      const raw = String(row[columns.total10] ?? '').trim();
-      const value = parseGradeValue(raw);
-      if (value !== null && value >= 0 && value <= 10) importedTotal10 = value;
+    const candidates = subjectsByName.get(normalizeImportHeader(name)) || [];
+    const subject = candidates.find((item) =>
+      parseSemesterLabel(item.semester)?.canonical === rowSemester.canonical
+    );
+    const cc = ccScores.find((value) => value !== null);
+    let grades = {};
+    for (const [key, score] of Object.entries({ cc, gk, ck })) {
+      if (score != null) grades[key] = Number.isInteger(score) ? score.toFixed(1) : String(score);
     }
-    let importedTotal4 = null;
-    if (columns.total4 !== -1) {
-      const raw = String(row[columns.total4] ?? '').trim();
-      const value = parseGradeValue(raw);
-      if (value !== null && value >= 0 && value <= 4) importedTotal4 = value;
+    if (rowFormula && gk !== null && ck !== null && importedTotal10 !== null) {
+      grades = reconcileGkCkOrder(grades, rowFormula.weights, importedTotal10).grades;
     }
-    let importedLetter = null;
-    if (columns.letter !== -1) {
-      const info = parseLetterGrade(row[columns.letter]);
-      if (info) importedLetter = info.letter;
+    const hasGrade = Object.keys(grades).length > 0;
+    if (importedTotal4 !== null && getLetterByPoint(importedTotal4) === null &&
+        importedTotal10 === null && !importedLetter && !hasGrade) {
+      skippedRows += 1;
+      invalidRows.push({ rowNumber: rowIndex + 1, fields: ['Thang 4'] });
+      continue;
     }
-
-    // Dòng chỉ có Thang 10 / Thang 4 / Chữ (không có điểm thành phần) vẫn nhập được.
-    // Dòng chỉ có Số TC cũng hợp lệ: chỉ cập nhật tín chỉ.
-    const hasGradeData = hasGrade
-      || importedTotal10 !== null
-      || importedTotal4 !== null
-      || importedLetter !== null;
+    const hasGradeData = hasGrade || importedTotal10 !== null || importedTotal4 !== null || importedLetter !== null;
     if (!hasGradeData && rowCredits === null) {
       skippedRows += 1;
       continue;
     }
 
-// Dòng không khớp môn nào: chỉ tạo môn mới khi có đủ Kỳ/Năm học + Số TC + ít nhất một dữ liệu điểm.
-    // Nhờ vậy nhập điểm năm 1/năm 2 vẫn được dù app đang ở học kỳ khác.
+    // Môn mới cần có số tín chỉ và ít nhất một dữ liệu điểm.
     if (!subject) {
-      if (!rowSemester || rowCredits === null || !hasGradeData) {
+      if (rowCredits === null || !hasGradeData) {
         skippedRows += 1;
         continue;
       }
@@ -339,9 +358,9 @@ export const parseGradeSheet = (rows, subjects) => {
         semesterInfo: rowSemester,
         credits: rowCredits,
         weights: rowFormula ? rowFormula.weights : null,
-        cc: nextGrades.cc ?? null,
-        gk: nextGrades.gk ?? null,
-        ck: nextGrades.ck ?? null,
+        cc: grades.cc ?? null,
+        gk: grades.gk ?? null,
+        ck: grades.ck ?? null,
         total10: importedTotal10,
         total4: importedTotal4,
         letter: importedLetter,
@@ -349,7 +368,7 @@ export const parseGradeSheet = (rows, subjects) => {
       continue;
     }
 
-    if (hasGrade) gradesBySubject.set(subject.id, nextGrades);
+    if (hasGrade) gradesBySubject.set(subject.id, { ...gradesBySubject.get(subject.id), ...grades });
     if (rowCredits !== null) creditsBySubject.set(subject.id, rowCredits);
     // Công thức chỉ đi kèm dòng có dữ liệu điểm; dòng chỉ có tín chỉ không đổi trọng số.
     if (hasGradeData && rowFormula) weightsBySubject.set(subject.id, rowFormula.weights);
@@ -360,6 +379,7 @@ export const parseGradeSheet = (rows, subjects) => {
 
   return {
     headerRowIndex,
+    missingColumns: [],
     gradesBySubject,
     weightsBySubject,
     creditsBySubject,
@@ -368,6 +388,7 @@ export const parseGradeSheet = (rows, subjects) => {
     letterBySubject,
     newCourses: [...newCoursesByKey.values()],
     skippedRows,
+    invalidRows,
   };
 };
 
@@ -385,7 +406,27 @@ export const getImportedSubjectIds = (result) => {
   return ids;
 };
 
-// Ghép kết quả đọc Excel vào danh sách môn hiện tại (tính lại tổng kết, xếp loại, badge).
+const getImportedCourseGrades = (values, weights, total10, total4, letter, existingTotal = null) => {
+  const grades = clearZeroWeightGrades(values, weights);
+  // Dùng điểm thành phần khi đủ, rồi đến tổng hệ 10 hoặc quy đổi từ điểm còn lại.
+  const total = calcCourseTotal(grades, weights)
+    ?? resolveGradeTotal(total10, total4, letter)
+    ?? existingTotal;
+  const grade = getGradeLetter(total);
+  const missingParts = ['cc', 'gk', 'ck'].filter(
+    (key) => parseDecimalValue(weights[key]) > 0 && parseGradeValue(grades[key]) === null
+  );
+  return {
+    cc: grades.cc || 'Chưa nhập',
+    gk: grades.gk || 'Chưa nhập',
+    ck: grades.ck || 'Chưa nhập',
+    total: total === null ? '--' : total.toFixed(2),
+    status: grade?.status ?? 'pending',
+    badge: grade?.text ?? (missingParts.length ? `Chờ nhập ${missingParts.join('/')}` : 'Chờ điểm'),
+  };
+};
+
+// Ghép kết quả đọc Excel vào danh sách môn hiện tại.
 export const applyImportedGrades = (subjects, result) =>
   subjects.map((subject) => {
     const imported = result.gradesBySubject.get(subject.id);
@@ -410,48 +451,14 @@ export const applyImportedGrades = (subjects, result) =>
     };
     const weights = result.weightsBySubject.get(subject.id) || subject.weights;
     const credits = importedCredits !== undefined ? importedCredits : subject.credits;
-    const calculatedTotal = calcCourseTotal(grades, weights);
-    // Thang 10 của trường là chuẩn; không có mới tự tính từ CC/GK/CK.
-    // Nếu vẫn chưa đủ điểm thì giữ tổng đang có trong app, không xóa thành "--".
-    const existingTotal = parseGradeValue(subject.total);
-    const total = importedTotal10 !== undefined
-      ? importedTotal10
-      : (calculatedTotal !== null ? calculatedTotal : existingTotal);
-
-    // Chữ của trường là chuẩn; thiếu thì suy từ Thang 4, rồi từ Thang 10/tự tính.
-    let letterInfo = importedLetter ? parseLetterGrade(importedLetter) : null;
-    if (!letterInfo && importedTotal4 !== undefined) {
-      const letter = getLetterByPoint(importedTotal4);
-      if (letter) letterInfo = { letter, point: LETTER_POINTS[letter] };
-    }
-    if (!letterInfo && total !== null) {
-      letterInfo = parseLetterGrade(getGradeLetter(total).text);
-    }
-
-    const missingParts = ['cc', 'gk', 'ck'].filter(
-      (key) => Number(weights[key]) > 0 && parseGradeValue(grades[key]) === null
-    );
-    const status = letterInfo
-      ? (letterInfo.point > 0 ? 'passed' : 'failed')
-      : (total === null ? 'pending' : getGradeLetter(total).status);
-    const badge = letterInfo
-      ? `${letterInfo.letter} (${letterInfo.point.toFixed(1)})`
-      : total !== null
-        ? getGradeLetter(total).text
-        : missingParts.length
-          ? `Chờ nhập ${missingParts.join('/')}`
-          : 'Chờ điểm';
 
     return {
       ...subject,
       weights,
       credits,
-      cc: grades.cc || 'Chưa nhập',
-      gk: grades.gk || 'Chưa nhập',
-      ck: grades.ck || 'Chưa nhập',
-      total: total === null ? '--' : total.toFixed(2),
-      status,
-      badge,
+      ...getImportedCourseGrades(
+        grades, weights, importedTotal10, importedTotal4, importedLetter, resolveGradeTotal(subject.total)
+      ),
     };
   });
 
@@ -459,44 +466,13 @@ export const applyImportedGrades = (subjects, result) =>
 // semester: { id, rawName, year, status } — học kỳ đã có hoặc vừa tạo.
 export const buildCourseFromImportRow = (row, semester) => {
   const weights = row.weights || { cc: '10', gk: '30', ck: '60' };
-  const grades = { cc: row.cc || '', gk: row.gk || '', ck: row.ck || '' };
-  const calculatedTotal = calcCourseTotal(grades, weights);
-  // Thang 10 trong file là chuẩn; không có mới tự tính từ CC/GK/CK.
-  const total = row.total10 !== null && row.total10 !== undefined ? row.total10 : calculatedTotal;
-
-  let letterInfo = row.letter ? parseLetterGrade(row.letter) : null;
-  if (!letterInfo && row.total4 !== null && row.total4 !== undefined) {
-    const letter = getLetterByPoint(row.total4);
-    if (letter) letterInfo = { letter, point: LETTER_POINTS[letter] };
-  }
-  if (!letterInfo && total !== null) letterInfo = parseLetterGrade(getGradeLetter(total).text);
-
-  const missingParts = ['cc', 'gk', 'ck'].filter(
-    (key) => Number(weights[key]) > 0 && parseGradeValue(grades[key]) === null
-  );
-  const status = letterInfo
-    ? (letterInfo.point > 0 ? 'passed' : 'failed')
-    : (total === null ? 'pending' : getGradeLetter(total).status);
-  const badge = letterInfo
-    ? `${letterInfo.letter} (${letterInfo.point.toFixed(1)})`
-    : total !== null
-      ? getGradeLetter(total).text
-      : missingParts.length
-        ? `Chờ nhập ${missingParts.join('/')}`
-        : 'Chờ điểm';
-
   return {
     name: row.name,
     credits: row.credits,
     semester: `${semester.rawName} (${semester.year.replace(' - ', '-')})`,
     sem: semester.id,
     weights,
-    status,
-    badge,
-    cc: grades.cc || 'Chưa nhập',
-    gk: grades.gk || 'Chưa nhập',
-    ck: grades.ck || 'Chưa nhập',
-    total: total === null ? '--' : total.toFixed(2),
+    ...getImportedCourseGrades(row, weights, row.total10, row.total4, row.letter),
     canEdit: semester.status !== 'Hoàn thành',
   };
 };

@@ -15,8 +15,10 @@ export const normalizeCourseName = (value) =>
 
 // Lấy 4 số cuối của mã học kỳ: sem_hk1_2627 -> 2627, sem_hk2_2425 -> 2425.
 export const getSemesterYearSuffix = (semesterId) => {
-  const match = String(semesterId ?? '').match(/(\d{2})(\d{2})$/);
-  return match ? `${match[1]}${match[2]}` : '';
+  const compact = compactDocumentId(semesterId);
+  const match = compact.match(/(?:^|_)hk\d+_(\d{4})(?:_|$)/i)
+    || compact.match(/(?:^|_)(\d{4})(?:_\d+)?$/);
+  return match?.[1] || '';
 };
 
 // Tên một từ viết hoa toàn bộ (AC, PBL...) giữ nguyên; còn lại lấy chữ cái đầu.
@@ -32,36 +34,37 @@ export const buildCourseCode = (name) => {
   return words.map((word) => word[0]).join('').toLowerCase().slice(0, 8);
 };
 
-// Thêm _2, _3... nếu mã đã dùng, để không ghi đè dữ liệu cũ.
-const makeUniqueId = (base, existingIds = []) => {
-  const used = new Set(existingIds);
-  if (!used.has(base)) return base;
+// Vẫn tách được mã gốc khi thao tác với bản ghi đã có định dạng dài.
+export const compactDocumentId = (id) =>
+  String(id ?? '').split('~').pop().replace(/^copy_[a-f0-9]{24}_/, '');
 
-  let index = 2;
-  while (used.has(`${base}_${index}`)) index += 1;
-  return `${base}_${index}`;
-};
+export const addOwnerSuffix = (id, uid) => `${id}_${uid.slice(-4)}`;
 
-// existingIds: mã học phần đã có trong app để tránh ghi đè khi trùng viết tắt.
-export const buildCourseId = (name, semesterId, existingIds = []) => {
+export const buildCourseId = (name, semesterId) => {
   const code = buildCourseCode(name);
   const suffix = getSemesterYearSuffix(semesterId);
-  const base = `crs_${code}${suffix ? `_${suffix}` : ''}`;
-  return makeUniqueId(base, existingIds);
+  return `crs_${code}${suffix ? `_${suffix}` : ''}`;
 };
 
+// Mã danh mục học phần (bảng courses, không phụ thuộc học kỳ): "An toàn thông tin" -> cat_att.
+// Tách khỏi mã lần học (crs_...) để 1 môn học lại vẫn trỏ về cùng một dòng danh mục.
+export const buildCatalogId = (name) => `cat_${buildCourseCode(name)}`;
+
+// Mã dự báo điểm: mỗi lần học tối đa 1 bản ghi -> fc_crs_att_2627.
+export const buildForecastId = (enrollmentId) => `fc_${compactDocumentId(enrollmentId)}`;
+
 // Mã học kỳ dễ nhận diện: "Học kỳ 1" + "2026 - 2027" -> sem_hk1_2627.
-export const buildSemesterDocumentId = (name, year, existingIds = []) => {
+export const buildSemesterDocumentId = (name, year) => {
   const termMatch = String(name ?? '').match(/(\d+)/);
-  const term = termMatch ? termMatch[1] : '1';
+  const term = termMatch?.[1] || (/\b(he|summer)\b/i.test(normalizeCourseName(name)) ? '3' : '1');
   const yearMatch = String(year ?? '').match(/(\d{4})\D+(\d{4})/);
   const suffix = yearMatch ? `${yearMatch[1].slice(-2)}${yearMatch[2].slice(-2)}` : '';
-  return makeUniqueId(`sem_hk${term}${suffix ? `_${suffix}` : ''}`, existingIds);
+  return `sem_hk${term}${suffix ? `_${suffix}` : ''}`;
 };
 
 // Mã thông báo nhắc thi: crs_att_2627 + ck -> rem_att_2627_ck.
-export const buildReminderId = (courseId, type, existingIds = []) => {
-  const courseCode = String(courseId ?? '').replace(/^crs_/, '') || 'mon';
+export const buildReminderId = (courseId, type) => {
+  const courseCode = compactDocumentId(courseId).replace(/^crs_/, '') || 'mon';
   const typeCode = type === 'mid' ? 'gk' : 'ck';
-  return makeUniqueId(`rem_${courseCode}_${typeCode}`, existingIds);
+  return `rem_${courseCode}_${typeCode}`;
 };

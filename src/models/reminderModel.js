@@ -1,10 +1,12 @@
-// Model bảng exam_reminders — ánh xạ giữa document Firestore và object dùng trong app.
+// Model bảng exam_reminders — lịch nhắc thi gắn với MỘT LẦN HỌC (course_enrollments).
+// Trước đây field liên kết tên là course_id; nay đổi thành enrollment_id nhưng vẫn đọc
+// được course_id cũ để không mất dữ liệu khi migrate.
 import { firstValue } from './utils';
 
 // Tên field theo ERD (8 field).
 export const FIELDS = [
   'reminder_id',
-  'course_id',
+  'enrollment_id',
   'reminder_type',
   'exam_date',
   'exam_time',
@@ -13,12 +15,13 @@ export const FIELDS = [
   'is_acknowledged',
 ];
 
-// Field phụ: mốc báo trước, phục vụ chức năng thông báo (không có trong ERD).
+// Field phụ: mốc báo trước + user_id (dùng cho Firestore Rules), không có trong ERD.
 // alarm_date / alarm_time là thời điểm báo thức người dùng tự chọn (thay cho advance).
-export const EXTRA_FIELDS = ['advance', 'alarm_date', 'alarm_time'];
+export const EXTRA_FIELDS = ['user_id', 'advance', 'alarm_date', 'alarm_time'];
 
 // Tên cũ đọc được để tương thích ngược với dữ liệu đã có.
 export const ALIASES = {
+  enrollment_id: ['enrollment_id', 'course_id', 'enrollmentId'],
   reminder_type: ['reminder_type', 'type', 'exam_type'],
   exam_date: ['exam_date', 'date'],
   exam_time: ['exam_time', 'time'],
@@ -41,15 +44,16 @@ export const formatDateForDatabase = (value) => {
   return match ? `${match[3]}-${match[2]}-${match[1]}` : String(value || '').trim();
 };
 
+// course: object enrollment (id, name, credits, semester) để giao diện hiển thị.
 export const fromFirestore = (snapshot, course) => {
   const data = snapshot.data();
   const dbType = String(firstValue(data, ALIASES.reminder_type, 'ck')).toLowerCase();
   return {
     id: snapshot.id,
-    courseId: course.id,
-    courseName: course.name,
-    credits: course.credits,
-    semesterLabel: course.semester,
+    courseId: course?.id || firstValue(data, ALIASES.enrollment_id, ''),
+    courseName: course?.name || 'Môn học',
+    credits: course?.credits ?? 0,
+    semesterLabel: course?.semester || '',
     type: ['gk', 'mid', 'midterm'].includes(dbType) ? 'mid' : 'final',
     date: formatDateForUi(firstValue(data, ALIASES.exam_date, '')),
     time: firstValue(data, ALIASES.exam_time, ''),
@@ -62,9 +66,10 @@ export const fromFirestore = (snapshot, course) => {
   };
 };
 
-export const toFirestore = (reminderId, reminder) => ({
+export const toFirestore = (reminderId, uid, reminder) => ({
   reminder_id: reminderId,
-  course_id: reminder.courseId,
+  user_id: uid,
+  enrollment_id: reminder.courseId,
   reminder_type: reminder.type === 'mid' ? 'gk' : 'ck',
   exam_date: formatDateForDatabase(reminder.date),
   exam_time: reminder.time,

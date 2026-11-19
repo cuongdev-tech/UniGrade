@@ -1,5 +1,6 @@
 // Model bảng semesters — ánh xạ giữa document Firestore và object dùng trong app.
 import { firstValue } from './utils';
+import { getCourseGradeTotal, hasFinalSemesterGpa } from '../services/gradeService';
 
 // Tên field theo ERD (8 field).
 export const FIELDS = [
@@ -28,6 +29,24 @@ export const getAcademicYearStart = (value) => {
   return match ? Number(match[1]) : null;
 };
 
+export const getSemesterTermOrder = (value) => {
+  const normalized = String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  if (/\b(he|summer)\b/.test(normalized)) return 3;
+  const match = normalized.match(/(?:hoc\s*ky|hk|ky|semester)\s*(\d+)/);
+  return match ? Number(match[1]) : 0;
+};
+
+export const compareSemesters = (left, right) => {
+  const yearDifference =
+    (getAcademicYearStart(left?.year) || 0) - (getAcademicYearStart(right?.year) || 0);
+  if (yearDifference !== 0) return yearDifference;
+  return getSemesterTermOrder(left?.rawName || left?.name) -
+    getSemesterTermOrder(right?.rawName || right?.name);
+};
+
 // Năm học cũ hơn năm học lớn nhất đã có -> kỳ lịch sử (hiển thị "Chưa xác nhận" nếu chưa chốt).
 export const isPastAcademicYear = (year, semesters = []) => {
   const startYear = getAcademicYearStart(year);
@@ -36,6 +55,14 @@ export const isPastAcademicYear = (year, semesters = []) => {
     return value !== null && value > max ? value : max;
   }, 0);
   return startYear !== null && latestStartYear > 0 && startYear < latestStartYear;
+};
+
+export const isPastSemester = (semester, semesters = []) => {
+  const latestSemester = semesters.reduce(
+    (latest, candidate) => (!latest || compareSemesters(candidate, latest) > 0 ? candidate : latest),
+    null
+  );
+  return Boolean(latestSemester && compareSemesters(semester, latestSemester) < 0);
 };
 
 export const normalizeStatus = (value) => {
@@ -48,19 +75,21 @@ export const normalizeStatus = (value) => {
 // Trạng thái hiển thị 3 mức:
 // - Hoàn thành: đã bấm xác nhận, khóa sửa điểm.
 // - Chưa xác nhận: đã học xong (năm cũ) nhưng chưa bấm xác nhận.
-// - Đang học: học kỳ của năm học lớn nhất, chưa chốt.
-export const getSemesterDisplayStatus = (status, year, semesters = []) => {
+// - Đang học: học kỳ mới nhất theo năm học và thứ tự kỳ, chưa chốt.
+export const getSemesterDisplayStatus = (status, year, semesters = [], semesterName = '') => {
   const normalized = normalizeStatus(status);
   if (normalized === 'Hoàn thành') return 'Hoàn thành';
   if (normalized === 'Chưa xác nhận') return 'Chưa xác nhận';
-  return isPastAcademicYear(year, semesters) ? 'Chưa xác nhận' : 'Đang học';
+  return isPastSemester({ year, rawName: semesterName }, semesters) ? 'Chưa xác nhận' : 'Đang học';
 };
 
 // Chỉ cho xác nhận khi kỳ chưa chốt, có ít nhất 1 môn và 100% môn đã có điểm tổng kết.
 export const canConfirmSemester = (status, courses = []) =>
   normalizeStatus(status) !== 'Hoàn thành' &&
   courses.length > 0 &&
-  courses.every((course) => course && course.status !== 'pending');
+  courses.every((course) =>
+    (course?.status === 'passed' || course?.status === 'failed') && getCourseGradeTotal(course) !== null
+  );
 
 export const fromFirestore = (snapshot) => {
   const data = snapshot.data();
@@ -89,3 +118,15 @@ export const toFirestore = (semesterId, uid, semester) => ({
 });
 
 export const toStatusUpdate = () => ({ status: 'completed' });
+
+export const toSemesterSummaryUpdate = (stats) => {
+  if (!stats || !hasFinalSemesterGpa(stats) || !(stats.gradedCredits > 0)
+    || ![stats.gpa, stats.avg10, stats.earnedCredits].every(Number.isFinite)) {
+    throw new Error('Học kỳ cần đủ điểm tổng kết và tín chỉ hợp lệ để lưu GPA.');
+  }
+  return {
+    semester_gpa_4: Number(stats.gpa.toFixed(2)),
+    semester_avg_10: Number(stats.avg10.toFixed(2)),
+    earned_credits: stats.earnedCredits,
+  };
+};

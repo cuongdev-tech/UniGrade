@@ -20,12 +20,14 @@ import {
 } from "react-native";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { COLORS } from "../constants/themeAndData";
+import { formatReminderAlarmAge, getReminderAlarmStatus } from "../services/reminderService";
+import LiveClock from "./LiveClock";
 
 const CLOSED_OFFSET = -440;
-
-export default function NotificationShade({ visible, reminder, onOpen, onClose }) {
+export default function NotificationShade({ visible, reminder, onOpen, onClose, onSnooze, error, isSaving }) {
   const slide = useRef(new Animated.Value(CLOSED_OFFSET)).current;
   const [rendered, setRendered] = useState(visible);
+  const [now, setNow] = useState(Date.now);
 
   useEffect(() => {
     if (visible) {
@@ -47,6 +49,14 @@ export default function NotificationShade({ visible, reminder, onOpen, onClose }
     }
   }, [visible, slide]);
 
+  useEffect(() => {
+    if (!visible) return undefined;
+    const refreshTime = () => setNow(Date.now());
+    refreshTime();
+    const timer = setInterval(refreshTime, 1000);
+    return () => clearInterval(timer);
+  }, [visible]);
+
   const closePan = useRef(
     PanResponder.create({
       onMoveShouldSetPanResponder: (_, gesture) => Math.abs(gesture.dy) > 6,
@@ -56,12 +66,7 @@ export default function NotificationShade({ visible, reminder, onOpen, onClose }
     })
   ).current;
 
-  if (!rendered || !reminder) return null;
-
-  const data = reminder || {};
-  const courseName = data.courseName;
-  const room = data.room;
-  const time = data.time;
+  if (!rendered || !reminder || getReminderAlarmStatus(reminder, now) !== "due") return null;
 
   return (
     <View style={styles.overlay}>
@@ -70,46 +75,42 @@ export default function NotificationShade({ visible, reminder, onOpen, onClose }
       <Animated.View style={[styles.panel, { transform: [{ translateY: slide }] }]}>
         <View {...closePan.panHandlers}>
           <View style={styles.statusRow}>
-            <Text style={styles.statusTextLight}>09:41</Text>
+            <LiveClock style={styles.statusTextLight} withDate />
             <View style={styles.statusRight}>
               <Text style={styles.statusTextLight}>5G</Text>
               <Ionicons name="cellular" size={12} color="#E2E8F0" />
               <Ionicons name="battery-full" size={14} color="#E2E8F0" />
             </View>
           </View>
-
           <View style={styles.handleWrap}>
             <View style={styles.handle} />
           </View>
 
-          <Text style={styles.dateText}>{data.date}</Text>
         </View>
 
-        <TouchableOpacity
-          activeOpacity={0.9}
-          style={styles.notificationCard}
-          onPress={onOpen}
-        >
-          <View style={styles.notificationHeader}>
-            <View style={styles.unigradeBadge}>
-              <Text style={styles.unigradeBadgeText}>U</Text>
-            </View>
-            <View style={{ flex: 1 }}>
+        <View style={styles.notificationCard}>
+          <TouchableOpacity activeOpacity={0.9} onPress={onOpen} accessibilityRole="button">
+            <View style={styles.notificationHeader}>
+              <View style={styles.unigradeBadge}>
+                <Text style={styles.unigradeBadgeText}>U</Text>
+              </View>
               <Text style={styles.notificationBrand}>UNIGRADE • NHẮC LỊCH THI</Text>
-              <Text style={styles.notificationMeta}>Báo thức tự động</Text>
+              <View style={styles.alarmPill}>
+                <Text style={styles.alarmPillText}>{formatReminderAlarmAge(reminder, now)}</Text>
+              </View>
             </View>
-            <View style={styles.nowPill}>
-              <Text style={styles.nowPillText}>Bây giờ</Text>
-            </View>
-          </View>
 
-          <Text style={styles.notificationTitle}>
-            🔔 ĐẾN GIỜ THI: {courseName} • {room}
-          </Text>
-          <Text style={styles.notificationLine}>
-            ⏰ Ca thi bắt đầu lúc {time} Sáng (Còn 30 phút)
-          </Text>
-          {!!data.note && <Text style={styles.notificationNote}>📌 Ghi chú: {data.note}</Text>}
+            <Text style={styles.notificationTitle}>
+              {reminder.courseName}{reminder.room ? ` • ${reminder.room}` : ""}
+            </Text>
+            <Text style={styles.notificationLine}>
+              ⏰ Báo thức lúc {reminder.alarmTime} ngày {reminder.alarmDate}
+            </Text>
+            <Text style={styles.notificationLine}>
+              📅 Giờ thi {reminder.time} ngày {reminder.date}
+            </Text>
+            {!!reminder.note && <Text style={styles.notificationNote}>📌 {reminder.note}</Text>}
+          </TouchableOpacity>
 
           <View style={styles.divider} />
 
@@ -117,11 +118,14 @@ export default function NotificationShade({ visible, reminder, onOpen, onClose }
             <TouchableOpacity style={styles.primaryActionBtn} onPress={onOpen}>
               <Text style={styles.primaryActionText}>Mở UniGrade xem chi tiết</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.secondaryActionBtn} onPress={onClose}>
-              <Text style={styles.secondaryActionText}>Báo lại 10p</Text>
-            </TouchableOpacity>
+            {onSnooze && (
+              <TouchableOpacity style={styles.secondaryActionBtn} onPress={onSnooze} disabled={isSaving}>
+                <Text style={styles.secondaryActionText}>{isSaving ? "Đang lưu..." : "Báo lại 10p"}</Text>
+              </TouchableOpacity>
+            )}
           </View>
-        </TouchableOpacity>
+          {!!error && <Text accessibilityRole="alert" style={styles.errorText}>{error}</Text>}
+        </View>
 
         <TouchableOpacity style={styles.closeBtn} onPress={onClose}>
           <Ionicons name="chevron-up" size={16} color="#CBD5E1" />
@@ -133,6 +137,11 @@ export default function NotificationShade({ visible, reminder, onOpen, onClose }
 }
 
 const styles = StyleSheet.create({
+  errorText: {
+    color: COLORS.danger,
+    fontSize: 12,
+    marginTop: 8,
+  },
   overlay: {
     ...StyleSheet.absoluteFillObject,
     pointerEvents: "box-none",
@@ -170,13 +179,6 @@ const styles = StyleSheet.create({
     borderRadius: 2,
     backgroundColor: "rgba(255,255,255,0.35)",
   },
-  dateText: {
-    color: "#CBD5E1",
-    fontSize: 12,
-    fontWeight: "500",
-    textAlign: "center",
-    marginBottom: 10,
-  },
   notificationCard: {
     backgroundColor: "#FFFFFF",
     borderColor: COLORS.green,
@@ -201,20 +203,14 @@ const styles = StyleSheet.create({
     marginRight: 8,
   },
   unigradeBadgeText: { color: "#FFFFFF", fontSize: 15, fontWeight: "600" },
-  notificationBrand: { color: COLORS.green, fontSize: 11, fontWeight: "700" },
-  notificationMeta: {
-    color: "#64748B",
-    fontSize: 10,
-    fontWeight: "500",
-    marginTop: 2,
-  },
-  nowPill: {
-    backgroundColor: "#FEF3C7",
+  notificationBrand: { flex: 1, color: COLORS.green, fontSize: 11, fontWeight: "700" },
+  alarmPill: {
+    backgroundColor: COLORS.amberLight,
     borderRadius: 11,
     paddingHorizontal: 10,
     paddingVertical: 4,
   },
-  nowPillText: { color: "#D97706", fontSize: 10, fontWeight: "700" },
+  alarmPillText: { color: COLORS.amber, fontSize: 10, fontWeight: "700" },
   notificationTitle: {
     color: "#0F172A",
     fontSize: 12.5,

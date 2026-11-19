@@ -1,0 +1,72 @@
+rules_version = '2';
+
+// UniGrade — 7 bảng theo ERD.
+// Mọi document (trừ users) đều có field user_id để Rules xác định chủ sở hữu.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner() {
+      return signedIn() && resource.data.user_id == request.auth.uid;
+    }
+
+    function keepsOwner() {
+      return signedIn() && request.resource.data.user_id == request.auth.uid;
+    }
+
+    // 1. USERS — document ID chính là UID.
+    match /users/{userId} {
+      allow read, write: if signedIn() && request.auth.uid == userId;
+    }
+
+    // 2. ACADEMIC_PROFILES — 1:1 với users.
+    match /academic_profiles/{profileId} {
+      allow read, delete: if isOwner();
+      allow create: if keepsOwner();
+      allow update: if isOwner() && keepsOwner();
+    }
+
+    // 3. SEMESTERS.
+    match /semesters/{semesterId} {
+      allow read, delete: if isOwner();
+      allow create: if keepsOwner();
+      allow update: if isOwner() && keepsOwner();
+    }
+
+    // 4. COURSES — danh mục học phần.
+    // Cho phép đọc khi đã đăng nhập (dữ liệu danh mục, không phải điểm).
+    // Cho phép xóa để dọn các document cũ chưa có user_id khi migrate.
+    match /courses/{courseId} {
+      allow read: if signedIn();
+      allow delete: if signedIn();
+      allow create: if keepsOwner();
+      allow update: if isOwner() && keepsOwner();
+    }
+
+    // 5. COURSE_ENROLLMENTS — điểm của từng lần học.
+    match /course_enrollments/{enrollmentId} {
+      allow read, delete: if isOwner();
+      allow create: if keepsOwner();
+      allow update: if isOwner() && keepsOwner();
+    }
+
+    // 6. GRADE_FORECASTS — dự báo điểm What-if.
+    match /grade_forecasts/{forecastId} {
+      allow read, delete: if isOwner();
+      allow create: if keepsOwner();
+      allow update: if isOwner() && keepsOwner();
+    }
+
+    // 7. EXAM_REMINDERS — lịch nhắc thi.
+    // Cho phép cập nhật document cũ chưa có user_id để migrate course_id -> enrollment_id.
+    match /exam_reminders/{reminderId} {
+      allow read: if signedIn();
+      allow delete: if signedIn();
+      allow create: if keepsOwner();
+      allow update: if keepsOwner() && (isOwner() || !('user_id' in resource.data));
+    }
+  }
+}
